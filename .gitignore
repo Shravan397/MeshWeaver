@@ -1,0 +1,24 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+
+# Environment secrets
+.env
+.env.*
+
+# Build files
+build/
+dist/
+*.egg-info/
