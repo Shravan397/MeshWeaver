@@ -3,18 +3,28 @@ import asyncio
 import logging
 from typing import Any, Callable
 
+from .protocol import Message
+
 
 logger = logging.getLogger(__name__)
 
 Decoder = Callable[[bytes], Any]
+MessageHandler = Callable[
+    [Any, tuple[str, int], asyncio.DatagramTransport], None
+]
 
 
 class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
     """Receives and processes incoming MeshWeaver UDP messages."""
 
-    def __init__(self, decoder: Decoder | None = None) -> None:
+    def __init__(
+        self,
+        decoder: Decoder | None = None,
+        message_handler: MessageHandler | None = None,
+    ) -> None:
         self.transport: asyncio.DatagramTransport | None = None
         self.decoder = decoder
+        self.message_handler = message_handler
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         """Called when the UDP endpoint is ready."""
@@ -36,11 +46,8 @@ class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
 
             print(f"Message: {message}")
 
-        except UnicodeDecodeError:
-            logger.warning(
-                "Received a message that is not valid UTF-8 from %s",
-                addr,
-            )
+            if self.message_handler is not None and self.transport is not None:
+                self.message_handler(message, addr, self.transport)
 
         except Exception:
             logger.exception(
@@ -65,12 +72,13 @@ async def start_udp_listener(
     host: str,
     port: int,
     decoder: Decoder | None = None,
+    message_handler: MessageHandler | None = None,
 ) -> tuple[asyncio.DatagramTransport, MeshWeaverUDPProtocol]:
     """Create and start the UDP listening endpoint."""
     loop = asyncio.get_running_loop()
 
     transport, protocol = await loop.create_datagram_endpoint(
-        lambda: MeshWeaverUDPProtocol(decoder),
+        lambda: MeshWeaverUDPProtocol(decoder, message_handler),
         local_addr=(host, port),
     )
 
