@@ -49,7 +49,7 @@ def test_decode_rejects_invalid_json():
 
 def test_decode_rejects_invalid_utf8():
     with pytest.raises(ProtocolValidationError) as exc:
-        decode_message(b"\\xff")
+        decode_message(b"\xff")
     assert exc.value.code == ErrorCode.INVALID_ENCODING.value
 
 
