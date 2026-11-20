@@ -13,7 +13,9 @@ from meshweaver.network.protocol import (
 
 
 def test_message_round_trip_preserves_existing_wire_format():
-    original = Message(type="PING", sender_id="node-a", payload={"target": "127.0.0.1:9000"})
+    original = Message(
+        type="PING", sender_id="node-a", payload={"target": "127.0.0.1:9000"}
+    )
     encoded = encode_message(original)
     decoded = decode_message(encoded)
 

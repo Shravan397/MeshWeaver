@@ -1,4 +1,3 @@
-
 """Select the best peer for executing a task."""
 
 from collections.abc import Iterable, Mapping
