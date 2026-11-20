@@ -72,7 +72,11 @@ class PeerRegistry:
             raise ValueError("node_id must be a non-empty string")
         if not isinstance(host, str) or not host.strip():
             raise ValueError("host must be a non-empty string")
-        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= 65535
+        ):
             raise ValueError("port must be an integer between 1 and 65535")
         if cpu_percent is not None and (
             not isinstance(cpu_percent, (int, float))
@@ -163,9 +167,7 @@ class PeerRegistry:
                 if last_seen is not None
                 else (time.time() if refresh_last_seen else current.last_seen)
             )
-            self._validate_peer(
-                node_id, new_host, new_port, new_cpu, new_last_seen
-            )
+            self._validate_peer(node_id, new_host, new_port, new_cpu, new_last_seen)
             try:
                 new_status = current.status if status is None else PeerStatus(status)
             except ValueError as exc:
@@ -186,9 +188,7 @@ class PeerRegistry:
         with self._lock:
             return self._peers.pop(node_id, None) is not None
 
-    def purge_inactive_peers(
-        self, timeout_seconds: float | None = None
-    ) -> list[str]:
+    def purge_inactive_peers(self, timeout_seconds: float | None = None) -> list[str]:
         """Remove peers already inactive and mark newly stale peers inactive.
 
         A peer that first becomes stale is retained as INACTIVE for this sweep.

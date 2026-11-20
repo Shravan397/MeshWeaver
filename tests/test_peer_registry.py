@@ -58,9 +58,7 @@ def test_filter_and_dictionary_serialization():
 
 def test_stale_peer_is_marked_then_removed_on_next_sweep():
     registry = PeerRegistry()
-    registry.register_peer(
-        "node-a", "127.0.0.1", 9000, last_seen=time.time() - 100
-    )
+    registry.register_peer("node-a", "127.0.0.1", 9000, last_seen=time.time() - 100)
 
     assert registry.purge_inactive_peers(timeout_seconds=10) == []
     assert registry.get_peer("node-a").status is PeerStatus.INACTIVE

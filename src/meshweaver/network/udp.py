@@ -1,21 +1,22 @@
 
+"""Async UDP transport for MeshWeaver."""
+
 import asyncio
 import logging
-from typing import Any, Callable
-
-from .protocol import Message
-
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 Decoder = Callable[[bytes], Any]
 MessageHandler = Callable[
-    [Any, tuple[str, int], asyncio.DatagramTransport], None
+    [Any, tuple[str, int], asyncio.DatagramTransport],
+    None,
 ]
 
 
 class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
-    """Receives and processes incoming MeshWeaver UDP messages."""
+    """Handles incoming and outgoing UDP datagrams."""
 
     def __init__(
         self,
@@ -26,17 +27,23 @@ class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
         self.decoder = decoder
         self.message_handler = message_handler
 
-    def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        """Called when the UDP endpoint is ready."""
+    def connection_made(
+        self,
+        transport: asyncio.BaseTransport,
+    ) -> None:
+        """Called when the UDP connection is established."""
         self.transport = transport  # type: ignore[assignment]
-        address = transport.get_extra_info("sockname")
-        logger.info("UDP listener ready at %s", address)
+
+        socket_info = transport.get_extra_info("sockname")
+        logger.info("UDP listener started on %s", socket_info)
 
     def datagram_received(
-        self, data: bytes, addr: tuple[str, int]
+        self,
+        data: bytes,
+        addr: tuple[str, int],
     ) -> None:
         """Called whenever a UDP message arrives."""
-        print(f"\nMessage received from {addr[0]}:{addr[1]}")
+        logger.debug("UDP datagram received from %s", addr)
 
         try:
             if self.decoder is not None:
@@ -44,28 +51,24 @@ class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
             else:
                 message = data.decode("utf-8")
 
-            print(f"Message: {message}")
-
             if self.message_handler is not None and self.transport is not None:
                 self.message_handler(message, addr, self.transport)
 
         except Exception:
-            logger.exception(
-                "Could not process message received from %s", addr
-            )
+            logger.exception("Could not process message received from %s", addr)
 
     def error_received(self, exc: Exception) -> None:
-        """Called when a UDP network error occurs."""
-        logger.error("UDP network error: %s", exc)
+        """Called when a UDP error occurs."""
+        logger.error("UDP error: %s", exc)
 
     def connection_lost(self, exc: Exception | None) -> None:
-        """Called when the UDP endpoint closes."""
+        """Called when the UDP connection is closed."""
         self.transport = None
 
-        if exc:
+        if exc is not None:
             logger.error("UDP connection lost: %s", exc)
         else:
-            logger.info("UDP listener closed.")
+            logger.info("UDP connection closed")
 
 
 async def start_udp_listener(
@@ -74,12 +77,65 @@ async def start_udp_listener(
     decoder: Decoder | None = None,
     message_handler: MessageHandler | None = None,
 ) -> tuple[asyncio.DatagramTransport, MeshWeaverUDPProtocol]:
-    """Create and start the UDP listening endpoint."""
+    """Start an asynchronous UDP listener."""
     loop = asyncio.get_running_loop()
 
     transport, protocol = await loop.create_datagram_endpoint(
-        lambda: MeshWeaverUDPProtocol(decoder, message_handler),
+        lambda: MeshWeaverUDPProtocol(
+            decoder=decoder,
+            message_handler=message_handler,
+        ),
         local_addr=(host, port),
     )
 
-    return transport, protocol
+    return transport, protocol  # type: ignore[return-value]
+
+
+
+def test_udp_listener_receives_real_datagram() -> None:
+    async def run_test() -> None:
+        received_messages = []
+        received = asyncio.Event()
+
+        def handler(message, address, transport):
+            received_messages.append((message, address))
+            received.set()
+
+        listener_transport, protocol = await start_udp_listener(
+            host="127.0.0.1",
+            port=0,
+            message_handler=handler,
+        )
+
+        loop = asyncio.get_running_loop()
+        sender_transport = None
+
+        try:
+            sender_transport, _ = await loop.create_datagram_endpoint(
+                asyncio.DatagramProtocol,
+                local_addr=("127.0.0.1", 0),
+            )
+
+            listener_address = listener_transport.get_extra_info("sockname")
+
+            sender_transport.sendto(
+                b"Real UDP integration test",
+                listener_address,
+            )
+
+            await asyncio.wait_for(received.wait(), timeout=2)
+
+            assert len(received_messages) == 1
+            assert received_messages[0][0] == "Real UDP integration test"
+            assert received_messages[0][1][0] == "127.0.0.1"
+
+        finally:
+            if sender_transport is not None:
+                sender_transport.close()
+
+            listener_transport.close()
+            await asyncio.sleep(0)
+
+        assert protocol.transport is None
+
+    asyncio.run(run_test())

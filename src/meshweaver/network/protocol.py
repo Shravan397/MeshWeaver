@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
 PROTOCOL_VERSION = 1
 MAX_PACKET_SIZE = 65507
 
@@ -83,7 +82,9 @@ class Message:
         """Convert the message into a JSON-compatible dictionary."""
         return {
             "version": self.version,
-            "type": self.type.value if isinstance(self.type, MessageType) else self.type,
+            "type": self.type.value
+            if isinstance(self.type, MessageType)
+            else self.type,
             "message_id": self.message_id,
             "sender_id": self.sender_id,
             "timestamp": self.timestamp,
@@ -108,7 +109,8 @@ def validate_message(message: Message) -> None:
     )
     if not isinstance(message_type, str) or message_type not in SUPPORTED_MESSAGE_TYPES:
         raise ProtocolValidationError(
-            ErrorCode.UNKNOWN_MESSAGE_TYPE, f"Unsupported message type: {message_type!r}"
+            ErrorCode.UNKNOWN_MESSAGE_TYPE,
+            f"Unsupported message type: {message_type!r}",
         )
     if not isinstance(message.sender_id, str) or not message.sender_id.strip():
         raise ProtocolValidationError(
@@ -180,7 +182,12 @@ def decode_message(data: bytes) -> Message:
         )
 
     required_fields = {
-        "version", "type", "message_id", "sender_id", "timestamp", "payload"
+        "version",
+        "type",
+        "message_id",
+        "sender_id",
+        "timestamp",
+        "payload",
     }
     missing_fields = required_fields - content.keys()
     if missing_fields:
