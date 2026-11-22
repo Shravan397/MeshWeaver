@@ -2,7 +2,8 @@
 """Tests for MeshWeaver resource monitoring."""
 
 import asyncio
-from unittest.mock import patch
+import ctypes
+from unittest.mock import mock_open, patch
 
 import pytest
 
@@ -26,6 +27,15 @@ def test_monitor_rejects_negative_interval() -> None:
 def test_monitor_rejects_boolean_interval() -> None:
     with pytest.raises(ValueError):
         ResourceMonitor(interval=True)
+
+
+@pytest.mark.parametrize(
+    "interval",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_monitor_rejects_non_finite_interval(interval: float) -> None:
+    with pytest.raises(ValueError, match="positive finite number"):
+        ResourceMonitor(interval=interval)
 
 
 def test_cpu_percentage_calculation() -> None:
@@ -167,3 +177,81 @@ def test_collect_is_async() -> None:
         result = asyncio.run(monitor.collect())
 
     assert result == expected
+
+
+def test_linux_cpu_parser_excludes_guest_counters() -> None:
+    cpu_data = "cpu 100 20 30 40 10 5 3 2 50 6\n"
+
+    with patch(
+        "builtins.open",
+        mock_open(read_data=cpu_data),
+    ):
+        idle, total = ResourceMonitor._read_linux_cpu_times()
+
+    assert idle == 50
+    assert total == 210
+
+
+def test_linux_memory_parser_returns_bytes() -> None:
+    memory_data = (
+        "MemTotal:       16384 kB\n"
+        "MemFree:         4096 kB\n"
+        "MemAvailable:    8192 kB\n"
+    )
+
+    with patch(
+        "builtins.open",
+        mock_open(read_data=memory_data),
+    ):
+        total, available = ResourceMonitor._read_linux_memory()
+
+    assert total == 16384 * 1024
+    assert available == 8192 * 1024
+
+
+def test_windows_cpu_parser_returns_idle_and_total_times() -> None:
+    class FakeKernel32:
+        @staticmethod
+        def GetSystemTimes(idle, kernel, user):
+            idle._obj.dwLowDateTime = 100
+            idle._obj.dwHighDateTime = 0
+
+            kernel._obj.dwLowDateTime = 300
+            kernel._obj.dwHighDateTime = 0
+
+            user._obj.dwLowDateTime = 200
+            user._obj.dwHighDateTime = 0
+
+            return 1
+
+    with patch.object(
+        ctypes,
+        "WinDLL",
+        return_value=FakeKernel32(),
+        create=True,
+    ):
+        idle, total = ResourceMonitor._read_windows_cpu_times()
+
+    assert idle == 100
+    assert total == 500
+
+
+def test_windows_memory_parser_returns_physical_memory() -> None:
+    class FakeKernel32:
+        @staticmethod
+        def GlobalMemoryStatusEx(status_pointer):
+            status = status_pointer._obj
+            status.ullTotalPhys = 16 * 1024**3
+            status.ullAvailPhys = 8 * 1024**3
+            return 1
+
+    with patch.object(
+        ctypes,
+        "WinDLL",
+        return_value=FakeKernel32(),
+        create=True,
+    ):
+        total, available = ResourceMonitor._read_windows_memory()
+
+    assert total == 16 * 1024**3
+    assert available == 8 * 1024**3

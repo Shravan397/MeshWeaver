@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import math
 import platform
 import time
 from dataclasses import dataclass
@@ -36,9 +37,10 @@ class ResourceMonitor:
         if (
             isinstance(interval, bool)
             or not isinstance(interval, (int, float))
+            or not math.isfinite(interval)
             or interval <= 0
         ):
-            raise ValueError("interval must be a positive number")
+            raise ValueError("interval must be a positive finite number")
 
         self.interval = float(interval)
 
@@ -141,7 +143,10 @@ class ResourceMonitor:
             if len(values) > 4:
                 idle += values[4]
 
-            total = sum(values)
+            # guest and guest_nice are already included in user and nice.
+            # Only the first eight fields should contribute to the total.
+            total = sum(values[:8])
+
             return idle, total
 
         except (OSError, ValueError) as exc:
