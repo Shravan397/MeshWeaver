@@ -1,13 +1,11 @@
-
 import argparse
 import asyncio
 import json
 import logging
 
-from .node import Node
+from .network.protocol import Message, decode_message, encode_message
 from .network.udp import start_udp_listener
-from .network.protocol import Message, encode_message, decode_message
-
+from .node import Node
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,9 +113,7 @@ async def run_node(
 def main() -> None:
     """Start the application."""
 
-    parser = argparse.ArgumentParser(
-        description="Start a MeshWeaver network node."
-    )
+    parser = argparse.ArgumentParser(description="Start a MeshWeaver network node.")
 
     parser.add_argument(
         "--host",
@@ -157,9 +153,7 @@ def main() -> None:
     if args.peer_port is not None and not 1 <= args.peer_port <= 65535:
         parser.error("Peer port must be between 1 and 65535.")
 
-    if args.ping and (
-        args.peer_host is None or args.peer_port is None
-    ):
+    if args.ping and (args.peer_host is None or args.peer_port is None):
         parser.error("--ping requires --peer-host and --peer-port.")
 
     try:

@@ -1,4 +1,3 @@
-
 import math
 
 from meshweaver.tasks.scheduler import select_best_peer

@@ -7,9 +7,7 @@ from dataclasses import asdict, dataclass, field
 class Node:
     """Represents a single MeshWeaver network node."""
 
-    node_id: str = field(
-        default_factory=lambda: f"node-{uuid.uuid4().hex[:8]}"
-    )
+    node_id: str = field(default_factory=lambda: f"node-{uuid.uuid4().hex[:8]}")
     hostname: str = field(default_factory=socket.gethostname)
     status: str = "active"
 
