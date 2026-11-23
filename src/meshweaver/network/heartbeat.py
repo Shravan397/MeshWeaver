@@ -1,15 +1,16 @@
-import json
+﻿import json
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 
 @dataclass
 class PendingHeartbeat:
     """Tracks an in-flight heartbeat PING awaiting a PONG reply."""
 
-    peer_id: strpytest tests/test_heartbeat.py -v
+    peer_id: str
     message_id: str
     sent_at: float
 
@@ -23,7 +24,7 @@ class HeartbeatMonitor:
         peer_registry: Any,
         timeout: float = 5.0,
         node_id: str = "local-node",
-        ping_encoder: Optional[Callable[[str, str], bytes]] = None,
+        ping_encoder: Callable[[str, str], bytes] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.transport = transport
@@ -33,10 +34,8 @@ class HeartbeatMonitor:
         self.ping_encoder = ping_encoder or self._default_encode_ping
         self.clock = clock
 
-        # Maps message_id -> PendingHeartbeat
-        self.pending_requests: Dict[str, PendingHeartbeat] = {}
-        # Maps peer_id -> latest round-trip latency in seconds
-        self.response_times: Dict[str, float] = {}
+        self.pending_requests: dict[str, PendingHeartbeat] = {}
+        self.response_times: dict[str, float] = {}
 
     @staticmethod
     def _default_encode_ping(node_id: str, message_id: str) -> bytes:
@@ -47,7 +46,7 @@ class HeartbeatMonitor:
         }
         return json.dumps(payload).encode("utf-8")
 
-    def _get_peer_address(self, peer_id: str) -> Tuple[str, int]:
+    def _get_peer_address(self, peer_id: str) -> tuple[str, int]:
         """Resolve (host, port) for peer_id from PeerRegistry."""
         if hasattr(self.peer_registry, "get_peer"):
             peer = self.peer_registry.get_peer(peer_id)
@@ -90,7 +89,6 @@ class HeartbeatMonitor:
                 self.peer_registry.update_status(peer_id, "unreachable")
                 return
 
-        # Fallback if PeerRegistry stores dict/object entries directly
         peers = getattr(self.peer_registry, "peers", None)
         if isinstance(peers, dict) and peer_id in peers:
             entry = peers[peer_id]
@@ -119,13 +117,12 @@ class HeartbeatMonitor:
         self.transport.send(packet, address)
         return message_id
 
-    def receive_pong(self, peer_id: str, message_id: str) -> Optional[float]:
+    def receive_pong(self, peer_id: str, message_id: str) -> float | None:
         """Validate a PONG reply, record latency, mark peer alive, and clear request."""
         pending = self.pending_requests.get(message_id)
         if pending is None or pending.peer_id != peer_id:
             return None
 
-        # Remove completed request immediately so it does not stay in memory
         del self.pending_requests[message_id]
 
         rtt = max(0.0, self.clock() - pending.sent_at)
@@ -133,7 +130,7 @@ class HeartbeatMonitor:
         self._set_peer_status(peer_id, alive=True)
         return rtt
 
-    def check_timeout(self) -> List[str]:
+    def check_timeout(self) -> list[str]:
         """Mark peers with expired heartbeat requests as unreachable and clean up."""
         now = self.clock()
         expired_ids = [
@@ -142,11 +139,11 @@ class HeartbeatMonitor:
             if (now - pending.sent_at) > self.timeout
         ]
 
-        unreachable_peers: List[str] = []
+        unreachable_peers: list[str] = []
         for msg_id in expired_ids:
             pending = self.pending_requests.pop(msg_id)
             self._set_peer_status(pending.peer_id, alive=False)
             if pending.peer_id not in unreachable_peers:
                 unreachable_peers.append(pending.peer_id)
 
-        return unreachable_peersgit
+        return unreachable_peers

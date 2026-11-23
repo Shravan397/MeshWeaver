@@ -1,5 +1,4 @@
-import json
-from typing import Dict, List, Tuple
+﻿import json
 
 from meshweaver.network.heartbeat import HeartbeatMonitor
 
@@ -8,9 +7,9 @@ class DummyTransport:
     """Captures outgoing UDP packets without opening a network socket."""
 
     def __init__(self) -> None:
-        self.sent_packets: List[Tuple[bytes, Tuple[str, int]]] = []
+        self.sent_packets: list[tuple[bytes, tuple[str, int]]] = []
 
-    def send(self, message: bytes, address: Tuple[str, int]) -> int:
+    def send(self, message: bytes, address: tuple[str, int]) -> int:
         self.sent_packets.append((message, address))
         return len(message)
 
@@ -19,9 +18,17 @@ class DummyPeerRegistry:
     """Minimal peer registry for unit testing heartbeat state transitions."""
 
     def __init__(self) -> None:
-        self.peers: Dict[str, dict] = {
-            "node-b": {"address": ("127.0.0.1", 5001), "status": "unknown", "alive": None},
-            "node-c": {"address": ("127.0.0.1", 5002), "status": "unknown", "alive": None},
+        self.peers: dict[str, dict] = {
+            "node-b": {
+                "address": ("127.0.0.1", 5001),
+                "status": "unknown",
+                "alive": None,
+            },
+            "node-c": {
+                "address": ("127.0.0.1", 5002),
+                "status": "unknown",
+                "alive": None,
+            },
         }
 
     def get_peer(self, peer_id: str) -> dict:
@@ -94,15 +101,12 @@ def test_unknown_and_duplicate_pong_ignored() -> None:
 
     msg_id = monitor.send_heartbeat("node-b")
 
-    # Unknown message_id is ignored
     assert monitor.receive_pong("node-b", "unknown-id-999") is None
     assert msg_id in monitor.pending_requests
 
-    # Mismatched peer_id is ignored
     assert monitor.receive_pong("node-c", msg_id) is None
     assert msg_id in monitor.pending_requests
 
-    # Valid PONG succeeds once, duplicate PONG afterwards is ignored
     assert monitor.receive_pong("node-b", msg_id) is not None
     assert monitor.receive_pong("node-b", msg_id) is None
 
@@ -115,12 +119,10 @@ def test_peer_marked_unreachable_after_timeout() -> None:
 
     msg_id = monitor.send_heartbeat("node-b")
 
-    # Before timeout expires
     clock.advance(4.0)
     assert monitor.check_timeout() == []
     assert msg_id in monitor.pending_requests
 
-    # After timeout expires (> 5.0s)
     clock.advance(2.0)
     unreachable = monitor.check_timeout()
 
