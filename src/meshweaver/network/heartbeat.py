@@ -1,8 +1,16 @@
-import json
+﻿"""Heartbeat management for MeshWeaver P2P nodes."""
+
+from __future__ import annotations
+
+import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
+
+from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
+from meshweaver.network.protocol import Message, MessageType, encode_message
 
 
 @dataclass
@@ -14,139 +22,181 @@ class PendingHeartbeat:
     sent_at: float
 
 
-class HeartbeatMonitor:
-    """Monitors peer liveness using PING/PONG messages over existing UDP transport."""
+class HeartbeatManager:
+    """Continuously monitors registered peers via PING/PONG heartbeats."""
 
     def __init__(
         self,
+        node_id: str,
         transport: Any,
-        peer_registry: Any,
+        peer_registry: PeerRegistry,
+        interval: float = 2.0,
         timeout: float = 5.0,
-        node_id: str = "local-node",
-        ping_encoder: Optional[Callable[[str, str], bytes]] = None,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
     ) -> None:
+        if not isinstance(node_id, str) or not node_id.strip():
+            raise ValueError("node_id must be a non-empty string")
+        if interval <= 0:
+            raise ValueError("interval must be greater than 0")
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than 0")
+
+        self.node_id = node_id
         self.transport = transport
         self.peer_registry = peer_registry
+        self.interval = interval
         self.timeout = timeout
-        self.node_id = node_id
-        self.ping_encoder = ping_encoder or self._default_encode_ping
         self.clock = clock
 
-        # Maps message_id -> PendingHeartbeat
-        self.pending_requests: Dict[str, PendingHeartbeat] = {}
-        # Maps peer_id -> latest round-trip latency in seconds
-        self.response_times: Dict[str, float] = {}
+        self._pending: dict[str, PendingHeartbeat] = {}
+        self._response_times: dict[str, float] = {}
+        self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
 
-    @staticmethod
-    def _default_encode_ping(node_id: str, message_id: str) -> bytes:
-        payload = {
-            "type": "PING",
-            "sender_id": node_id,
-            "message_id": message_id,
-        }
-        return json.dumps(payload).encode("utf-8")
+    @property
+    def is_running(self) -> bool:
+        """Return True while the background heartbeat loop is active."""
+        return self._thread is not None and self._thread.is_alive()
 
-    def _get_peer_address(self, peer_id: str) -> Tuple[str, int]:
-        """Resolve (host, port) for peer_id from PeerRegistry."""
-        if hasattr(self.peer_registry, "get_peer"):
-            peer = self.peer_registry.get_peer(peer_id)
-        elif hasattr(self.peer_registry, "peers"):
-            peer = self.peer_registry.peers.get(peer_id)
-        else:
-            peer = None
+    @property
+    def pending_requests(self) -> dict[str, PendingHeartbeat]:
+        """Return a snapshot of currently pending heartbeat requests."""
+        with self._lock:
+            return dict(self._pending)
 
+    @property
+    def response_times(self) -> dict[str, float]:
+        """Return a snapshot of recorded peer round-trip times in seconds."""
+        with self._lock:
+            return dict(self._response_times)
+
+    def send_heartbeat(self, peer_id: str) -> str:
+        """Send a PING message to a registered peer and track the pending request."""
+        peer = self.peer_registry.get_peer(peer_id)
         if peer is None:
             raise KeyError(f"Unknown peer_id: {peer_id}")
 
-        if isinstance(peer, tuple) and len(peer) == 2:
-            return peer
-        if isinstance(peer, dict):
-            if "address" in peer:
-                return tuple(peer["address"])
-            if "host" in peer and "port" in peer:
-                return (peer["host"], int(peer["port"]))
-        if hasattr(peer, "address"):
-            return tuple(peer.address)
-        if hasattr(peer, "host") and hasattr(peer, "port"):
-            return (peer.host, int(peer.port))
-
-        raise ValueError(f"Cannot resolve network address for peer: {peer_id}")
-
-    def _set_peer_status(self, peer_id: str, alive: bool) -> None:
-        """Update peer liveness state in PeerRegistry."""
-        if alive:
-            if hasattr(self.peer_registry, "mark_alive"):
-                self.peer_registry.mark_alive(peer_id)
-                return
-            if hasattr(self.peer_registry, "update_status"):
-                self.peer_registry.update_status(peer_id, "alive")
-                return
-        else:
-            if hasattr(self.peer_registry, "mark_unreachable"):
-                self.peer_registry.mark_unreachable(peer_id)
-                return
-            if hasattr(self.peer_registry, "update_status"):
-                self.peer_registry.update_status(peer_id, "unreachable")
-                return
-
-        # Fallback if PeerRegistry stores dict/object entries directly
-        peers = getattr(self.peer_registry, "peers", None)
-        if isinstance(peers, dict) and peer_id in peers:
-            entry = peers[peer_id]
-            status = "alive" if alive else "unreachable"
-            if isinstance(entry, dict):
-                entry["alive"] = alive
-                entry["status"] = status
-            else:
-                if hasattr(entry, "alive"):
-                    entry.alive = alive
-                if hasattr(entry, "status"):
-                    entry.status = status
-
-    def send_heartbeat(self, peer_id: str) -> str:
-        """Generate a unique message ID, record send time, and dispatch a PING."""
-        address = self._get_peer_address(peer_id)
-        message_id = uuid.uuid4().hex
+        message_id = str(uuid.uuid4())
         sent_at = self.clock()
-
-        packet = self.ping_encoder(self.node_id, message_id)
-        self.pending_requests[message_id] = PendingHeartbeat(
-            peer_id=peer_id,
+        ping_msg = Message(
+            type=MessageType.PING,
+            sender_id=self.node_id,
             message_id=message_id,
-            sent_at=sent_at,
+            timestamp=sent_at,
+            payload={"target_id": peer_id},
         )
-        self.transport.send(packet, address)
+        encoded = encode_message(ping_msg)
+
+        with self._lock:
+            self._pending[message_id] = PendingHeartbeat(
+                peer_id=peer_id,
+                message_id=message_id,
+                sent_at=sent_at,
+            )
+
+        (getattr(self.transport, "sendto", None) or self.transport.send)(encoded, (peer.host, peer.port))
         return message_id
 
-    def receive_pong(self, peer_id: str, message_id: str) -> Optional[float]:
-        """Validate a PONG reply, record latency, mark peer alive, and clear request."""
-        pending = self.pending_requests.get(message_id)
-        if pending is None or pending.peer_id != peer_id:
-            return None
+    def build_pong(self, ping_message: Message) -> Message:
+        """Create a PONG reply matching an incoming PING message."""
+        return Message(
+            type=MessageType.PONG,
+            sender_id=self.node_id,
+            message_id=ping_message.message_id,
+            timestamp=self.clock(),
+            payload={"ref_id": ping_message.message_id},
+        )
 
-        # Remove completed request immediately so it does not stay in memory
-        del self.pending_requests[message_id]
+    def receive_pong(self, peer_id: str, message_id: str) -> float | None:
+        """Process a PONG reply, update peer last_seen, and clear pending state."""
+        with self._lock:
+            pending = self._pending.get(message_id)
+            if pending is None or pending.peer_id != peer_id:
+                return None
+            del self._pending[message_id]
 
-        rtt = max(0.0, self.clock() - pending.sent_at)
-        self.response_times[peer_id] = rtt
-        self._set_peer_status(peer_id, alive=True)
+            now = self.clock()
+            rtt = max(0.0, now - pending.sent_at)
+            self._response_times[peer_id] = rtt
+
+        self.peer_registry.update_peer(
+            peer_id,
+            status=PeerStatus.ACTIVE,
+            last_seen=now,
+            refresh_last_seen=False,
+        )
         return rtt
 
-    def check_timeout(self) -> List[str]:
-        """Mark peers with expired heartbeat requests as unreachable and clean up."""
+    def handle_message(self, message: Message) -> float | None:
+        """Handle an incoming protocol Message if it is a PONG reply."""
+        if message.type != MessageType.PONG:
+            return None
+        ref_id = message.payload.get("ref_id") or message.payload.get("message_id")
+        target_msg_id = ref_id if isinstance(ref_id, str) else message.message_id
+        return self.receive_pong(message.sender_id, target_msg_id)
+
+    def check_timeouts(self) -> list[str]:
+        """Mark peers with expired heartbeats INACTIVE and purge stale requests."""
         now = self.clock()
-        expired_ids = [
-            msg_id
-            for msg_id, pending in self.pending_requests.items()
-            if (now - pending.sent_at) > self.timeout
-        ]
+        expired: list[PendingHeartbeat] = []
 
-        unreachable_peers: List[str] = []
-        for msg_id in expired_ids:
-            pending = self.pending_requests.pop(msg_id)
-            self._set_peer_status(pending.peer_id, alive=False)
-            if pending.peer_id not in unreachable_peers:
-                unreachable_peers.append(pending.peer_id)
+        with self._lock:
+            expired_ids = [
+                msg_id
+                for msg_id, pending in self._pending.items()
+                if (now - pending.sent_at) > self.timeout
+            ]
+            for msg_id in expired_ids:
+                expired.append(self._pending.pop(msg_id))
 
-        return unreachable_peers
+        timed_out_peers: list[str] = []
+        for pending in expired:
+            self.peer_registry.update_peer(
+                pending.peer_id,
+                status=PeerStatus.INACTIVE,
+                refresh_last_seen=False,
+            )
+            if pending.peer_id not in timed_out_peers:
+                timed_out_peers.append(pending.peer_id)
+
+        return timed_out_peers
+
+    def run_cycle(self) -> None:
+        """Execute one timeout check and send heartbeats to active peers."""
+        self.check_timeouts()
+        for peer in self.peer_registry.get_all_peers(status=PeerStatus.ACTIVE):
+            if peer.node_id == self.node_id:
+                continue
+            self.send_heartbeat(peer.node_id)
+
+    def _loop(self) -> None:
+        while not self._stop_event.is_set():
+            self.run_cycle()
+            self._stop_event.wait(self.interval)
+
+    def start(self) -> None:
+        """Start the background heartbeat monitoring thread."""
+        with self._lock:
+            if self.is_running:
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._loop,
+                name=f"heartbeat-{self.node_id}",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def stop(self, join_timeout: float = 2.0) -> None:
+        """Stop the background heartbeat monitoring thread cleanly."""
+        with self._lock:
+            thread = self._thread
+            if thread is None:
+                return
+            self._stop_event.set()
+
+        thread.join(timeout=join_timeout)
+        with self._lock:
+            if not thread.is_alive():
+                self._thread = None
