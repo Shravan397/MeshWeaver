@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
 from meshweaver.network.protocol import Message, MessageType, encode_message
-from meshweaver.network.udp import UDPTransport
 
 
 @dataclass

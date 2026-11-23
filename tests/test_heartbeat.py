@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from meshweaver.network.heartbeat import HeartbeatManager
 from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
 from meshweaver.network.protocol import Message, MessageType, decode_message
@@ -93,9 +95,9 @@ def test_receive_pong_updates_last_seen_and_clears_pending() -> None:
     )
     rtt = manager.handle_message(pong)
 
-    assert rtt == 0.4
+    assert rtt == pytest.approx(0.4)
     assert msg_id not in manager.pending_requests
-    assert manager.response_times["node-b"] == 0.4
+    assert manager.response_times["node-b"] == pytest.approx(0.4)
 
     peer = registry.get_peer("node-b")
     assert peer is not None
