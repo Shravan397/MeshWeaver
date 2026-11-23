@@ -1,10 +1,16 @@
-﻿import json
+﻿"""Unit tests for HeartbeatManager using PeerRegistry and protocol messages."""
 
-from meshweaver.network.heartbeat import HeartbeatMonitor
+from __future__ import annotations
+
+import time
+
+from meshweaver.network.heartbeat import HeartbeatManager
+from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
+from meshweaver.network.protocol import Message, MessageType, decode_message
 
 
-class DummyTransport:
-    """Captures outgoing UDP packets without opening a network socket."""
+class FakeTransport:
+    """In-memory UDP transport stand-in that records sent packets."""
 
     def __init__(self) -> None:
         self.sent_packets: list[tuple[bytes, tuple[str, int]]] = []
@@ -14,39 +20,10 @@ class DummyTransport:
         return len(message)
 
 
-class DummyPeerRegistry:
-    """Minimal peer registry for unit testing heartbeat state transitions."""
-
-    def __init__(self) -> None:
-        self.peers: dict[str, dict] = {
-            "node-b": {
-                "address": ("127.0.0.1", 5001),
-                "status": "unknown",
-                "alive": None,
-            },
-            "node-c": {
-                "address": ("127.0.0.1", 5002),
-                "status": "unknown",
-                "alive": None,
-            },
-        }
-
-    def get_peer(self, peer_id: str) -> dict:
-        return self.peers[peer_id]
-
-    def mark_alive(self, peer_id: str) -> None:
-        self.peers[peer_id]["status"] = "alive"
-        self.peers[peer_id]["alive"] = True
-
-    def mark_unreachable(self, peer_id: str) -> None:
-        self.peers[peer_id]["status"] = "unreachable"
-        self.peers[peer_id]["alive"] = False
-
-
 class FakeClock:
-    """Deterministic clock for testing timeout behavior without sleep()."""
+    """Deterministic clock for testing timestamps and timeouts."""
 
-    def __init__(self, start: float = 100.0) -> None:
+    def __init__(self, start: float = 1000.0) -> None:
         self.now = start
 
     def __call__(self) -> float:
@@ -56,76 +33,152 @@ class FakeClock:
         self.now += seconds
 
 
-def test_ping_request_is_recorded() -> None:
-    transport = DummyTransport()
-    registry = DummyPeerRegistry()
-    clock = FakeClock(10.0)
-    monitor = HeartbeatMonitor(transport, registry, timeout=5.0, clock=clock)
+def test_send_heartbeat_records_pending_and_encodes_protocol_ping() -> None:
+    transport = FakeTransport()
+    registry = PeerRegistry()
+    clock = FakeClock(1000.0)
+    registry.register_peer("node-b", "127.0.0.1", 5001, last_seen=1000.0)
 
-    msg_id = monitor.send_heartbeat("node-b")
+    manager = HeartbeatManager(
+        node_id="node-a",
+        transport=transport,  # type: ignore[arg-type]
+        peer_registry=registry,
+        timeout=5.0,
+        clock=clock,
+    )
 
-    assert msg_id in monitor.pending_requests
-    assert monitor.pending_requests[msg_id].peer_id == "node-b"
-    assert monitor.pending_requests[msg_id].sent_at == 10.0
+    msg_id = manager.send_heartbeat("node-b")
+
+    assert msg_id in manager.pending_requests
+    assert manager.pending_requests[msg_id].peer_id == "node-b"
+    assert manager.pending_requests[msg_id].sent_at == 1000.0
     assert len(transport.sent_packets) == 1
 
-    raw_data, target_addr = transport.sent_packets[0]
-    decoded = json.loads(raw_data.decode("utf-8"))
-    assert decoded["type"] == "PING"
-    assert decoded["message_id"] == msg_id
+    raw_bytes, target_addr = transport.sent_packets[0]
+    decoded = decode_message(raw_bytes)
+    assert decoded.type == MessageType.PING
+    assert decoded.sender_id == "node-a"
+    assert decoded.message_id == msg_id
     assert target_addr == ("127.0.0.1", 5001)
 
 
-def test_matching_pong_is_accepted_and_clears_pending_request() -> None:
-    transport = DummyTransport()
-    registry = DummyPeerRegistry()
-    clock = FakeClock(10.0)
-    monitor = HeartbeatMonitor(transport, registry, timeout=5.0, clock=clock)
+def test_receive_pong_updates_last_seen_and_clears_pending() -> None:
+    transport = FakeTransport()
+    registry = PeerRegistry()
+    clock = FakeClock(1000.0)
+    registry.register_peer(
+        "node-b",
+        "127.0.0.1",
+        5001,
+        status=PeerStatus.INACTIVE,
+        last_seen=990.0,
+    )
 
-    msg_id = monitor.send_heartbeat("node-b")
-    clock.advance(0.25)
+    manager = HeartbeatManager(
+        node_id="node-a",
+        transport=transport,  # type: ignore[arg-type]
+        peer_registry=registry,
+        timeout=5.0,
+        clock=clock,
+    )
 
-    rtt = monitor.receive_pong("node-b", msg_id)
+    msg_id = manager.send_heartbeat("node-b")
+    clock.advance(0.4)
 
-    assert rtt == 0.25
-    assert monitor.response_times["node-b"] == 0.25
-    assert registry.peers["node-b"]["status"] == "alive"
-    assert msg_id not in monitor.pending_requests
+    pong = Message(
+        type=MessageType.PONG,
+        sender_id="node-b",
+        message_id=msg_id,
+        timestamp=clock(),
+    )
+    rtt = manager.handle_message(pong)
 
+    assert rtt == 0.4
+    assert msg_id not in manager.pending_requests
+    assert manager.response_times["node-b"] == 0.4
 
-def test_unknown_and_duplicate_pong_ignored() -> None:
-    transport = DummyTransport()
-    registry = DummyPeerRegistry()
-    clock = FakeClock(10.0)
-    monitor = HeartbeatMonitor(transport, registry, timeout=5.0, clock=clock)
-
-    msg_id = monitor.send_heartbeat("node-b")
-
-    assert monitor.receive_pong("node-b", "unknown-id-999") is None
-    assert msg_id in monitor.pending_requests
-
-    assert monitor.receive_pong("node-c", msg_id) is None
-    assert msg_id in monitor.pending_requests
-
-    assert monitor.receive_pong("node-b", msg_id) is not None
-    assert monitor.receive_pong("node-b", msg_id) is None
+    peer = registry.get_peer("node-b")
+    assert peer is not None
+    assert peer.status == PeerStatus.ACTIVE
+    assert peer.last_seen == 1000.4
 
 
-def test_peer_marked_unreachable_after_timeout() -> None:
-    transport = DummyTransport()
-    registry = DummyPeerRegistry()
-    clock = FakeClock(10.0)
-    monitor = HeartbeatMonitor(transport, registry, timeout=5.0, clock=clock)
+def test_unmatched_and_duplicate_pong_ignored() -> None:
+    transport = FakeTransport()
+    registry = PeerRegistry()
+    clock = FakeClock(1000.0)
+    registry.register_peer("node-b", "127.0.0.1", 5001, last_seen=1000.0)
+    registry.register_peer("node-c", "127.0.0.1", 5002, last_seen=1000.0)
 
-    msg_id = monitor.send_heartbeat("node-b")
+    manager = HeartbeatManager(
+        node_id="node-a",
+        transport=transport,  # type: ignore[arg-type]
+        peer_registry=registry,
+        timeout=5.0,
+        clock=clock,
+    )
+
+    msg_id = manager.send_heartbeat("node-b")
+
+    assert manager.receive_pong("node-b", "unknown-message-id") is None
+    assert manager.receive_pong("node-c", msg_id) is None
+    assert msg_id in manager.pending_requests
+
+    assert manager.receive_pong("node-b", msg_id) is not None
+    assert manager.receive_pong("node-b", msg_id) is None
+
+
+def test_check_timeouts_marks_peer_inactive_and_cleans_up() -> None:
+    transport = FakeTransport()
+    registry = PeerRegistry()
+    clock = FakeClock(1000.0)
+    registry.register_peer("node-b", "127.0.0.1", 5001, last_seen=1000.0)
+
+    manager = HeartbeatManager(
+        node_id="node-a",
+        transport=transport,  # type: ignore[arg-type]
+        peer_registry=registry,
+        timeout=5.0,
+        clock=clock,
+    )
+
+    msg_id = manager.send_heartbeat("node-b")
 
     clock.advance(4.0)
-    assert monitor.check_timeout() == []
-    assert msg_id in monitor.pending_requests
+    assert manager.check_timeouts() == []
+    assert msg_id in manager.pending_requests
 
     clock.advance(2.0)
-    unreachable = monitor.check_timeout()
+    expired_peers = manager.check_timeouts()
 
-    assert unreachable == ["node-b"]
-    assert registry.peers["node-b"]["status"] == "unreachable"
-    assert msg_id not in monitor.pending_requests
+    assert expired_peers == ["node-b"]
+    assert msg_id not in manager.pending_requests
+
+    peer = registry.get_peer("node-b")
+    assert peer is not None
+    assert peer.status == PeerStatus.INACTIVE
+
+
+def test_start_and_stop_background_loop() -> None:
+    transport = FakeTransport()
+    registry = PeerRegistry()
+    registry.register_peer("node-b", "127.0.0.1", 5001)
+
+    manager = HeartbeatManager(
+        node_id="node-a",
+        transport=transport,  # type: ignore[arg-type]
+        peer_registry=registry,
+        interval=0.05,
+        timeout=1.0,
+    )
+
+    manager.start()
+    assert manager.is_running is True
+
+    deadline = time.time() + 1.0
+    while len(transport.sent_packets) == 0 and time.time() < deadline:
+        time.sleep(0.01)
+
+    manager.stop()
+    assert manager.is_running is False
+    assert len(transport.sent_packets) >= 1
