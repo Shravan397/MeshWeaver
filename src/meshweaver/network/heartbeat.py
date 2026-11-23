@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+import asyncio
 from dataclasses import dataclass
 
 from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
@@ -27,7 +28,7 @@ class HeartbeatManager:
     def __init__(
         self,
         node_id: str,
-        transport: UDPTransport,
+        transport: asyncio.DatagramTransport,
         peer_registry: PeerRegistry,
         interval: float = 2.0,
         timeout: float = 5.0,
@@ -94,7 +95,7 @@ class HeartbeatManager:
                 sent_at=sent_at,
             )
 
-        self.transport.send(encoded, (peer.host, peer.port))
+        if hasattr(self.transport, "sendto"): self.transport.sendto(encoded, (peer.host, peer.port))`n        else: self.transport.send(encoded, (peer.host, peer.port))
         return message_id
 
     def build_pong(self, ping_message: Message) -> Message:
