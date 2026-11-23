@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 class PendingHeartbeat:
     """Tracks an in-flight heartbeat PING awaiting a PONG reply."""
 
-    peer_id: str
+    peer_id: strpytest tests/test_heartbeat.py -v
     message_id: str
     sent_at: float
 
@@ -149,4 +149,4 @@ class HeartbeatMonitor:
             if pending.peer_id not in unreachable_peers:
                 unreachable_peers.append(pending.peer_id)
 
-        return unreachable_peers
+        return unreachable_peersgit
