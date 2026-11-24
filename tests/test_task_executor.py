@@ -1,4 +1,4 @@
-﻿"""Unit and two-node UDP integration tests for TaskExecutor."""
+"""Unit and two-node UDP integration tests for TaskExecutor."""
 
 from __future__ import annotations
 
@@ -7,7 +7,12 @@ import asyncio
 from meshweaver.network.discovery import PeerDiscovery
 from meshweaver.network.heartbeat import HeartbeatManager
 from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
-from meshweaver.network.protocol import Message, MessageType, decode_message, encode_message
+from meshweaver.network.protocol import (
+    Message,
+    MessageType,
+    decode_message,
+    encode_message,
+)
 from meshweaver.network.udp import start_udp_listener
 from meshweaver.tasks.executor import TaskExecutor
 from meshweaver.tasks.task import TaskStatus
@@ -26,8 +31,12 @@ class DummyTransport:
 def test_dispatch_selects_lowest_cpu_peer_and_completes_on_result() -> None:
     async def run_test() -> None:
         registry = PeerRegistry()
-        registry.register_peer("node-busy", "127.0.0.1", 9101, status=PeerStatus.ACTIVE, cpu_percent=78.5)
-        registry.register_peer("node-idle", "127.0.0.1", 9102, status=PeerStatus.ACTIVE, cpu_percent=12.0)
+        registry.register_peer(
+            "node-busy", "127.0.0.1", 9101, status=PeerStatus.ACTIVE, cpu_percent=78.5
+        )
+        registry.register_peer(
+            "node-idle", "127.0.0.1", 9102, status=PeerStatus.ACTIVE, cpu_percent=12.0
+        )
 
         transport = DummyTransport()
         executor = TaskExecutor("node-coord", transport, registry)
@@ -67,7 +76,9 @@ def test_dispatch_selects_lowest_cpu_peer_and_completes_on_result() -> None:
 def test_requeue_orphaned_tasks_when_worker_becomes_inactive() -> None:
     async def run_test() -> None:
         registry = PeerRegistry()
-        registry.register_peer("node-worker", "127.0.0.1", 9103, status=PeerStatus.ACTIVE, cpu_percent=15.0)
+        registry.register_peer(
+            "node-worker", "127.0.0.1", 9103, status=PeerStatus.ACTIVE, cpu_percent=15.0
+        )
         transport = DummyTransport()
         executor = TaskExecutor("node-coord", transport, registry)
 
@@ -135,7 +146,9 @@ def test_two_nodes_exchange_heartbeat_cpu_and_execute_task_over_udp() -> None:
         hb_b: HeartbeatManager | None = None
         completed_event = asyncio.Event()
 
-        def handler_a(msg: Message, addr: tuple[str, int], transport: asyncio.DatagramTransport) -> None:
+        def handler_a(
+            msg: Message, addr: tuple[str, int], transport: asyncio.DatagramTransport
+        ) -> None:
             if msg.type in (MessageType.PING, MessageType.PONG):
                 disc_a.handle_discovery_message(msg, addr)
             if msg.type == MessageType.PONG and hb_a is not None:
@@ -144,30 +157,46 @@ def test_two_nodes_exchange_heartbeat_cpu_and_execute_task_over_udp() -> None:
                 if exec_a.handle_result_message(msg):
                     completed_event.set()
 
-        def handler_b(msg: Message, addr: tuple[str, int], transport: asyncio.DatagramTransport) -> None:
+        def handler_b(
+            msg: Message, addr: tuple[str, int], transport: asyncio.DatagramTransport
+        ) -> None:
             if msg.type in (MessageType.PING, MessageType.PONG):
                 disc_b.handle_discovery_message(msg, addr)
             if msg.type == MessageType.PING and hb_b is not None:
                 pong = hb_b.build_pong(msg)
                 transport.sendto(encode_message(pong), addr)
             elif msg.type == MessageType.TASK_ASSIGN and exec_b is not None:
+
                 async def _work() -> None:
                     reply = await exec_b.execute_assigned_task(msg)
                     transport.sendto(encode_message(reply), addr)
 
                 asyncio.create_task(_work())
 
-        trans_a, _ = await start_udp_listener("127.0.0.1", 0, decoder=decode_message, message_handler=handler_a)
-        trans_b, _ = await start_udp_listener("127.0.0.1", 0, decoder=decode_message, message_handler=handler_b)
+        trans_a, _ = await start_udp_listener(
+            "127.0.0.1", 0, decoder=decode_message, message_handler=handler_a
+        )
+        trans_b, _ = await start_udp_listener(
+            "127.0.0.1", 0, decoder=decode_message, message_handler=handler_b
+        )
 
         try:
             addr_b = trans_b.get_extra_info("sockname")
             hb_a = HeartbeatManager("node-a", trans_a, reg_a, interval=1.0, timeout=5.0)
-            hb_b = HeartbeatManager("node-b", trans_b, reg_b, interval=1.0, timeout=5.0, cpu_provider=lambda: 18.5)
+            hb_b = HeartbeatManager(
+                "node-b",
+                trans_b,
+                reg_b,
+                interval=1.0,
+                timeout=5.0,
+                cpu_provider=lambda: 18.5,
+            )
             exec_a = TaskExecutor("node-a", trans_a, reg_a)
             exec_b = TaskExecutor("node-b", trans_b, reg_b)
 
-            reg_a.register_peer("node-b", addr_b[0], addr_b[1], status=PeerStatus.ACTIVE)
+            reg_a.register_peer(
+                "node-b", addr_b[0], addr_b[1], status=PeerStatus.ACTIVE
+            )
             hb_a.send_heartbeat("node-b")
             await asyncio.sleep(0.05)
 
