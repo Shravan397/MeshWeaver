@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import uuid
@@ -33,6 +34,7 @@ class HeartbeatManager:
         interval: float = 2.0,
         timeout: float = 5.0,
         clock: Callable[[], float] = time.time,
+        cpu_provider: Callable[[], float | None] | None = None,
     ) -> None:
         if not isinstance(node_id, str) or not node_id.strip():
             raise ValueError("node_id must be a non-empty string")
@@ -47,6 +49,7 @@ class HeartbeatManager:
         self.interval = interval
         self.timeout = timeout
         self.clock = clock
+        self.cpu_provider = cpu_provider
 
         self._pending: dict[str, PendingHeartbeat] = {}
         self._response_times: dict[str, float] = {}
@@ -101,16 +104,32 @@ class HeartbeatManager:
 
     def build_pong(self, ping_message: Message) -> Message:
         """Create a PONG reply matching an incoming PING message."""
+        payload: dict[str, Any] = {"ref_id": ping_message.message_id}
+        if self.cpu_provider is not None:
+            cpu = self.cpu_provider()
+            if (
+                isinstance(cpu, (int, float))
+                and not isinstance(cpu, bool)
+                and math.isfinite(cpu)
+                and 0 <= cpu <= 100
+            ):
+                payload["cpu_percent"] = float(cpu)
+
         return Message(
             type=MessageType.PONG,
             sender_id=self.node_id,
             message_id=ping_message.message_id,
             timestamp=self.clock(),
-            payload={"ref_id": ping_message.message_id},
+            payload=payload,
         )
 
-    def receive_pong(self, peer_id: str, message_id: str) -> float | None:
-        """Process a PONG reply, update peer last_seen, and clear pending state."""
+    def receive_pong(
+        self,
+        peer_id: str,
+        message_id: str,
+        cpu_percent: float | None = None,
+    ) -> float | None:
+        """Process a PONG reply, update peer last_seen/CPU, and clear pending state."""
         with self._lock:
             pending = self._pending.get(message_id)
             if pending is None or pending.peer_id != peer_id:
@@ -124,6 +143,7 @@ class HeartbeatManager:
         self.peer_registry.update_peer(
             peer_id,
             status=PeerStatus.ACTIVE,
+            cpu_percent=cpu_percent,
             last_seen=now,
             refresh_last_seen=False,
         )
@@ -135,7 +155,20 @@ class HeartbeatManager:
             return None
         ref_id = message.payload.get("ref_id") or message.payload.get("message_id")
         target_msg_id = ref_id if isinstance(ref_id, str) else message.message_id
-        return self.receive_pong(message.sender_id, target_msg_id)
+        raw_cpu = message.payload.get("cpu_percent")
+        cpu_percent = (
+            float(raw_cpu)
+            if isinstance(raw_cpu, (int, float))
+            and not isinstance(raw_cpu, bool)
+            and math.isfinite(raw_cpu)
+            and 0 <= raw_cpu <= 100
+            else None
+        )
+        return self.receive_pong(
+            message.sender_id,
+            target_msg_id,
+            cpu_percent=cpu_percent,
+        )
 
     def check_timeouts(self) -> list[str]:
         """Mark peers with expired heartbeats INACTIVE and purge stale requests."""

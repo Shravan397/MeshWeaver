@@ -1,16 +1,17 @@
-
-import argparse
+﻿import argparse
 import asyncio
 import json
 import logging
 
 from .config import NodeConfig
+from .monitoring.resource_monitor import ResourceMonitor, ResourceMonitorError
 from .network.discovery import PeerDiscovery
 from .network.heartbeat import HeartbeatManager
 from .network.peer_registry import PeerRegistry
 from .network.protocol import Message, decode_message, encode_message
 from .network.udp import start_udp_listener
 from .node import Node
+from .tasks.executor import TaskExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,9 +39,46 @@ class ThreadSafeUDPTransport:
         )
 
 
+async def sample_cpu_loop(
+    monitor: ResourceMonitor,
+    cpu_state: dict[str, float | None],
+    interval: float = 2.0,
+) -> None:
+    """Periodically refresh cached CPU usage without blocking the event loop."""
+    while True:
+        try:
+            snapshot = await monitor.collect()
+            cpu_state["cpu_percent"] = snapshot.cpu_percent
+        except ResourceMonitorError as exc:
+            logging.debug("CPU sample skipped: %s", exc)
+        await asyncio.sleep(interval)
+
+
+async def dispatch_tasks_loop(
+    task_executor: TaskExecutor,
+    interval: float = 0.5,
+) -> None:
+    """Continuously requeue orphaned tasks and dispatch pending tasks to peers."""
+    while True:
+        requeued = await task_executor.requeue_orphaned_tasks()
+        for task_id in requeued:
+            logging.warning("Requeued orphaned task as %s", task_id)
+
+        dispatched = await task_executor.dispatch_next()
+        if dispatched is not None:
+            task, target_peer_id = dispatched
+            logging.info(
+                "Dispatched task %s (%s) to peer %s",
+                task.task_id,
+                task.task_type,
+                target_peer_id,
+            )
+
+        await asyncio.sleep(interval)
+
+
 async def monitor_peer_status(peer_registry: PeerRegistry) -> None:
     """Log peer status changes detected in the registry."""
-
     previous_statuses: dict[str, str] = {}
 
     while True:
@@ -66,10 +104,27 @@ async def monitor_peer_status(peer_registry: PeerRegistry) -> None:
                     previous_status,
                     current_status,
                 )
-
                 previous_statuses[peer.node_id] = current_status
 
         await asyncio.sleep(1)
+
+
+async def _run_and_reply_task(
+    message: Message,
+    addr: tuple[str, int],
+    transport: asyncio.DatagramTransport,
+    task_executor: TaskExecutor,
+) -> None:
+    """Execute an incoming TASK_ASSIGN and send back TASK_RESULT."""
+    result_msg = await task_executor.execute_assigned_task(message)
+    transport.sendto(encode_message(result_msg), addr)
+    logging.info(
+        "TASK_RESULT sent for task %s (%s) to %s:%s",
+        result_msg.payload.get("task_id"),
+        result_msg.payload.get("status"),
+        addr[0],
+        addr[1],
+    )
 
 
 def handle_message(
@@ -79,18 +134,15 @@ def handle_message(
     node: Node,
     discovery: PeerDiscovery,
     heartbeat_manager: HeartbeatManager,
+    task_executor: TaskExecutor | None = None,
 ) -> None:
     """Handle incoming MeshWeaver messages."""
-
-    # Ignore messages originating from this node.
     if message.sender_id == node.node_id:
         logging.debug("Ignoring message from this node.")
         return
 
-    # Discover or update peers using PING/PONG messages.
     if message.type in ("PING", "PONG"):
         peer = discovery.handle_discovery_message(message, addr)
-
         logging.info(
             "Peer discovered/updated: %s at %s:%s",
             peer.node_id,
@@ -99,32 +151,14 @@ def handle_message(
         )
 
     if message.type == "PING":
-        logging.info(
-            "PING received from node: %s",
-            message.sender_id,
-        )
-
+        logging.info("PING received from node: %s", message.sender_id)
         response = heartbeat_manager.build_pong(message)
-
-        transport.sendto(
-            encode_message(response),
-            addr,
-        )
-
-        logging.info(
-            "PONG sent to %s:%s",
-            addr[0],
-            addr[1],
-        )
+        transport.sendto(encode_message(response), addr)
+        logging.info("PONG sent to %s:%s", addr[0], addr[1])
 
     elif message.type == "PONG":
-        logging.info(
-            "PONG received from node: %s",
-            message.sender_id,
-        )
-
+        logging.info("PONG received from node: %s", message.sender_id)
         rtt = heartbeat_manager.handle_message(message)
-
         if rtt is not None:
             logging.info(
                 "Heartbeat successful with %s (RTT: %.4f seconds)",
@@ -134,6 +168,25 @@ def handle_message(
         else:
             logging.info(
                 "PONG received; no matching heartbeat request was pending."
+            )
+
+    elif message.type == "TASK_ASSIGN" and task_executor is not None:
+        logging.info(
+            "TASK_ASSIGN received from %s for task %s",
+            message.sender_id,
+            message.payload.get("task_id"),
+        )
+        asyncio.create_task(
+            _run_and_reply_task(message, addr, transport, task_executor)
+        )
+
+    elif message.type == "TASK_RESULT" and task_executor is not None:
+        accepted = task_executor.handle_result_message(message)
+        if accepted:
+            logging.info(
+                "TASK_RESULT received for task %s: %s",
+                message.payload.get("task_id"),
+                message.payload,
             )
 
     elif message.type == "ERROR":
@@ -147,21 +200,21 @@ def handle_message(
 async def run_node(
     config: NodeConfig,
     send_ping: bool,
+    initial_task: tuple[str, dict] | None = None,
 ) -> None:
-    """Start a MeshWeaver node with discovery and heartbeat monitoring."""
-
+    """Start a MeshWeaver node with discovery, heartbeat, and task execution."""
     node = Node()
-
-    # Create shared peer registry and discovery manager.
     peer_registry = PeerRegistry()
     discovery = PeerDiscovery(peer_registry)
+    resource_monitor = ResourceMonitor()
+    cpu_state: dict[str, float | None] = {"cpu_percent": 0.0}
 
     transport = None
     heartbeat_manager = None
-    status_monitor_task: asyncio.Task[None] | None = None
+    task_executor = None
+    background_tasks: list[asyncio.Task[None]] = []
 
     try:
-        # Start the UDP listener.
         transport, _protocol = await start_udp_listener(
             config.listen_host,
             config.listen_port,
@@ -174,6 +227,7 @@ async def run_node(
                     node,
                     discovery,
                     heartbeat_manager,
+                    task_executor,
                 )
                 if heartbeat_manager is not None
                 else None
@@ -181,81 +235,77 @@ async def run_node(
         )
 
         address = transport.get_extra_info("sockname")
-
-        # Create a thread-safe adapter for the heartbeat background thread.
         loop = asyncio.get_running_loop()
+        heartbeat_transport = ThreadSafeUDPTransport(loop, transport)
 
-        heartbeat_transport = ThreadSafeUDPTransport(
-            loop,
-            transport,
-        )
-
-        # Initialize heartbeat monitoring using validated configuration.
         heartbeat_manager = HeartbeatManager(
             node_id=node.node_id,
             transport=heartbeat_transport,
             peer_registry=peer_registry,
             interval=config.heartbeat_interval_seconds,
             timeout=config.heartbeat_timeout_seconds,
+            cpu_provider=lambda: cpu_state["cpu_percent"],
+        )
+        task_executor = TaskExecutor(
+            node_id=node.node_id,
+            transport=transport,
+            peer_registry=peer_registry,
         )
 
         print("\n" + "=" * 40)
         print("       MESHWEAVER NODE")
         print("=" * 40)
-
         print("\nNode Information:")
         print(json.dumps(node.get_info(), indent=4))
-
         print("\nUDP Listener Started!")
         print(f"Listening on: {address[0]}:{address[1]}")
-
         print("\nHeartbeat Configuration:")
-        print(
-            f"Interval: {config.heartbeat_interval_seconds} seconds"
-        )
-        print(
-            f"Timeout: {config.heartbeat_timeout_seconds} seconds"
-        )
+        print(f"Interval: {config.heartbeat_interval_seconds} seconds")
+        print(f"Timeout: {config.heartbeat_timeout_seconds} seconds")
 
-        # Send an optional initial PING to the configured bootstrap peer.
         if send_ping:
             if not config.bootstrap_peers:
                 raise ValueError(
                     "A bootstrap peer is required when --ping is enabled."
                 )
-
             bootstrap_host, bootstrap_port = config.bootstrap_peers[0]
-
             ping = Message(
                 type="PING",
                 sender_id=node.node_id,
-                payload={
-                    "target": f"{bootstrap_host}:{bootstrap_port}"
-                },
+                payload={"target": f"{bootstrap_host}:{bootstrap_port}"},
             )
-
             transport.sendto(
                 encode_message(ping),
                 (bootstrap_host, bootstrap_port),
             )
-
             logging.info(
                 "Initial PING sent to %s:%s",
                 bootstrap_host,
                 bootstrap_port,
             )
 
-        # Start periodic heartbeat monitoring.
-        heartbeat_manager.start()
+        if initial_task is not None:
+            task_type, task_payload = initial_task
+            queued = await task_executor.submit_task(task_type, task_payload)
+            logging.info(
+                "Enqueued initial task %s (%s)",
+                queued.task_id,
+                queued.task_type,
+            )
 
+        heartbeat_manager.start()
         logging.info("Heartbeat manager started.")
 
-        # Start monitoring peer ACTIVE/INACTIVE status changes.
-        status_monitor_task = asyncio.create_task(
-            monitor_peer_status(peer_registry)
+        background_tasks.extend(
+            [
+                asyncio.create_task(monitor_peer_status(peer_registry)),
+                asyncio.create_task(
+                    sample_cpu_loop(resource_monitor, cpu_state)
+                ),
+                asyncio.create_task(dispatch_tasks_loop(task_executor)),
+            ]
         )
-
-        logging.info("Peer status monitor started.")
+        logging.info("Peer status, CPU monitor, and task dispatcher started.")
 
         print("\nWaiting for incoming messages...")
         print("Press CTRL+C to stop.\n")
@@ -263,21 +313,18 @@ async def run_node(
         await asyncio.Event().wait()
 
     finally:
-        # Stop the background heartbeat thread before closing UDP.
         if heartbeat_manager is not None:
             heartbeat_manager.stop()
             logging.info("Heartbeat manager stopped.")
 
-        # Cancel and cleanly stop the peer status monitor.
-        if status_monitor_task is not None:
-            status_monitor_task.cancel()
-
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
             try:
-                await status_monitor_task
+                await task
             except asyncio.CancelledError:
-                logging.info("Peer status monitor stopped.")
+                pass
 
-        # Close the UDP listener after background tasks stop.
         if transport is not None:
             transport.close()
             logging.info("UDP listener closed.")
@@ -287,56 +334,56 @@ async def run_node(
 
 def main() -> None:
     """Start the application."""
-
     parser = argparse.ArgumentParser(
         description="Start a MeshWeaver network node."
     )
-
     parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="IP address to listen on.",
+        "--host", default="127.0.0.1", help="IP address to listen on."
     )
-
     parser.add_argument(
-        "--port",
-        type=int,
-        default=9000,
-        help="UDP listening port.",
+        "--port", type=int, default=9000, help="UDP listening port."
     )
-
     parser.add_argument(
-        "--peer-host",
-        help="IP address of the bootstrap peer.",
+        "--peer-host", help="IP address of the bootstrap peer."
     )
-
     parser.add_argument(
-        "--peer-port",
-        type=int,
-        help="Port of the bootstrap peer.",
+        "--peer-port", type=int, help="Port of the bootstrap peer."
     )
-
     parser.add_argument(
         "--ping",
         action="store_true",
         help="Send an initial PING to the bootstrap peer.",
     )
+    parser.add_argument(
+        "--submit-task",
+        help="Submit a task on startup as '<type>:<json_payload>' (e.g. 'sum:{\"numbers\":[1,2,3]}').",
+    )
 
     args = parser.parse_args()
 
-    # Both bootstrap peer arguments must be provided together.
     if (args.peer_host is None) != (args.peer_port is None):
         parser.error(
             "--peer-host and --peer-port must be provided together."
         )
 
-    # PING requires a configured bootstrap peer.
     if args.ping and args.peer_host is None:
-        parser.error(
-            "--ping requires --peer-host and --peer-port."
-        )
+        parser.error("--ping requires --peer-host and --peer-port.")
 
-    # Validate all startup configuration before opening the UDP listener.
+    initial_task: tuple[str, dict] | None = None
+    if args.submit_task is not None:
+        if ":" not in args.submit_task:
+            parser.error(
+                "--submit-task must follow '<task_type>:<json_payload>'."
+            )
+        task_type, raw_json = args.submit_task.split(":", maxsplit=1)
+        try:
+            parsed_payload = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            parser.error(f"Invalid JSON payload in --submit-task: {exc}")
+        if not isinstance(parsed_payload, dict):
+            parser.error("--submit-task JSON payload must be a JSON object.")
+        initial_task = (task_type.strip(), parsed_payload)
+
     try:
         config = NodeConfig(
             listen_host=args.host,
@@ -356,6 +403,7 @@ def main() -> None:
             run_node(
                 config,
                 args.ping,
+                initial_task=initial_task,
             )
         )
     except KeyboardInterrupt:
