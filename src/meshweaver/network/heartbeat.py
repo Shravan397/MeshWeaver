@@ -95,7 +95,8 @@ class HeartbeatManager:
                 sent_at=sent_at,
             )
 
-        (getattr(self.transport, "sendto", None) or self.transport.send)(encoded, (peer.host, peer.port))
+        send = getattr(self.transport, "sendto", None) or self.transport.send
+        send(encoded, (peer.host, peer.port))
         return message_id
 
     def build_pong(self, ping_message: Message) -> Message:
