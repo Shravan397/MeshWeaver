@@ -17,6 +17,8 @@ class MessageType(str, Enum):
 
     PING = "PING"
     PONG = "PONG"
+    TASK_ASSIGN = "TASK_ASSIGN"
+    TASK_RESULT = "TASK_RESULT"
     ERROR = "ERROR"
 
 
