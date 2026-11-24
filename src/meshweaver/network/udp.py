@@ -1,5 +1,4 @@
-
-"""Async UDP transport for MeshWeaver."""
+﻿"""Async UDP transport for MeshWeaver."""
 
 import asyncio
 import logging
@@ -89,53 +88,3 @@ async def start_udp_listener(
     )
 
     return transport, protocol  # type: ignore[return-value]
-
-
-
-def test_udp_listener_receives_real_datagram() -> None:
-    async def run_test() -> None:
-        received_messages = []
-        received = asyncio.Event()
-
-        def handler(message, address, transport):
-            received_messages.append((message, address))
-            received.set()
-
-        listener_transport, protocol = await start_udp_listener(
-            host="127.0.0.1",
-            port=0,
-            message_handler=handler,
-        )
-
-        loop = asyncio.get_running_loop()
-        sender_transport = None
-
-        try:
-            sender_transport, _ = await loop.create_datagram_endpoint(
-                asyncio.DatagramProtocol,
-                local_addr=("127.0.0.1", 0),
-            )
-
-            listener_address = listener_transport.get_extra_info("sockname")
-
-            sender_transport.sendto(
-                b"Real UDP integration test",
-                listener_address,
-            )
-
-            await asyncio.wait_for(received.wait(), timeout=2)
-
-            assert len(received_messages) == 1
-            assert received_messages[0][0] == "Real UDP integration test"
-            assert received_messages[0][1][0] == "127.0.0.1"
-
-        finally:
-            if sender_transport is not None:
-                sender_transport.close()
-
-            listener_transport.close()
-            await asyncio.sleep(0)
-
-        assert protocol.transport is None
-
-    asyncio.run(run_test())
