@@ -1,7 +1,8 @@
-﻿"""Heartbeat management for MeshWeaver P2P nodes."""
+"""Heartbeat management for MeshWeaver P2P nodes."""
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -13,6 +14,8 @@ from typing import Any
 from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
 from meshweaver.network.protocol import Message, MessageType, encode_message
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PendingHeartbeat:
@@ -21,6 +24,8 @@ class PendingHeartbeat:
     peer_id: str
     message_id: str
     sent_at: float
+    host: str = ""
+    port: int = 0
 
 
 class HeartbeatManager:
@@ -35,6 +40,7 @@ class HeartbeatManager:
         timeout: float = 5.0,
         clock: Callable[[], float] = time.time,
         cpu_provider: Callable[[], float | None] | None = None,
+        probe_inactive: bool = True,
     ) -> None:
         if not isinstance(node_id, str) or not node_id.strip():
             raise ValueError("node_id must be a non-empty string")
@@ -50,6 +56,7 @@ class HeartbeatManager:
         self.timeout = timeout
         self.clock = clock
         self.cpu_provider = cpu_provider
+        self.probe_inactive = probe_inactive
 
         self._pending: dict[str, PendingHeartbeat] = {}
         self._response_times: dict[str, float] = {}
@@ -96,10 +103,23 @@ class HeartbeatManager:
                 peer_id=peer_id,
                 message_id=message_id,
                 sent_at=sent_at,
+                host=peer.host,
+                port=peer.port,
             )
 
         send = getattr(self.transport, "sendto", None) or self.transport.send
-        send(encoded, (peer.host, peer.port))
+        try:
+            send(encoded, (peer.host, peer.port))
+        except OSError as exc:
+            with self._lock:
+                self._pending.pop(message_id, None)
+            logger.debug(
+                "Heartbeat PING send to %s (%s:%s) encountered socket error: %s",
+                peer_id,
+                peer.host,
+                peer.port,
+                exc,
+            )
         return message_id
 
     def build_pong(self, ping_message: Message) -> Message:
@@ -132,12 +152,28 @@ class HeartbeatManager:
         """Process a PONG reply, update peer last_seen/CPU, and clear pending state."""
         with self._lock:
             pending = self._pending.get(message_id)
-            if pending is None or pending.peer_id != peer_id:
+            if pending is None:
                 return None
+
+            same_peer = pending.peer_id == peer_id
+            same_endpoint = False
+            if not same_peer and pending.host and pending.port:
+                registered = self.peer_registry.get_peer(peer_id)
+                same_endpoint = (
+                    registered is not None
+                    and registered.host == pending.host
+                    and registered.port == pending.port
+                )
+
+            if not same_peer and not same_endpoint:
+                return None
+
             del self._pending[message_id]
 
             now = self.clock()
             rtt = max(0.0, now - pending.sent_at)
+            if not same_peer:
+                self._response_times.pop(pending.peer_id, None)
             self._response_times[peer_id] = rtt
 
         self.peer_registry.update_peer(
@@ -197,9 +233,14 @@ class HeartbeatManager:
         return timed_out_peers
 
     def run_cycle(self) -> None:
-        """Execute one timeout check and send heartbeats to active peers."""
+        """Execute one timeout check and send heartbeats to known peers."""
         self.check_timeouts()
-        for peer in self.peer_registry.get_all_peers(status=PeerStatus.ACTIVE):
+        peers = (
+            self.peer_registry.get_all_peers()
+            if self.probe_inactive
+            else self.peer_registry.get_all_peers(status=PeerStatus.ACTIVE)
+        )
+        for peer in peers:
             if peer.node_id == self.node_id:
                 continue
             self.send_heartbeat(peer.node_id)

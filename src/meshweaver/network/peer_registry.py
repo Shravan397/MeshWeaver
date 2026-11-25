@@ -184,6 +184,25 @@ class PeerRegistry:
     def _copy(peer: PeerRecord) -> PeerRecord:
         return replace(peer)
 
+    def evict_endpoint_duplicates(
+        self,
+        keep_node_id: str,
+        host: str,
+        port: int,
+    ) -> list[str]:
+        """Remove stale peer records sharing (host, port) with another node_id."""
+        with self._lock:
+            stale_ids = [
+                existing_id
+                for existing_id, existing_peer in self._peers.items()
+                if existing_id != keep_node_id
+                and existing_peer.host == host
+                and existing_peer.port == port
+            ]
+            for stale_id in stale_ids:
+                del self._peers[stale_id]
+            return stale_ids
+
     def register_peer(
         self,
         node_id: str,
@@ -237,6 +256,22 @@ class PeerRegistry:
         with self._lock:
             peer = self._peers.get(node_id)
             return self._copy(peer) if peer is not None else None
+
+    def get_peer_by_address(self, host: str, port: int) -> PeerRecord | None:
+        """Return a copy of a peer matching (host, port), or None when unknown."""
+        with self._lock:
+            matches = [
+                peer
+                for peer in self._peers.values()
+                if peer.host == host and peer.port == port
+            ]
+            if not matches:
+                return None
+            matches.sort(
+                key=lambda p: (p.status == PeerStatus.ACTIVE, p.last_seen),
+                reverse=True,
+            )
+            return self._copy(matches[0])
 
     def get_all_peers(
         self,
@@ -345,6 +380,7 @@ class PeerRegistry:
         timeout_seconds: float | None = None,
     ) -> list[str]:
         """Remove peers already inactive and mark newly stale peers inactive.
+
         A peer that first becomes stale is retained as INACTIVE for this sweep.
         It is removed by a subsequent sweep, allowing callers to observe the
         state transition before deletion.

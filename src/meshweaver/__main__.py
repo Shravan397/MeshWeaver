@@ -133,12 +133,39 @@ async def dispatch_tasks_loop(
         await asyncio.sleep(interval)
 
 
+async def probe_bootstrap_peers_loop(
+    node: Node,
+    transport: asyncio.DatagramTransport,
+    peer_registry: PeerRegistry,
+    bootstrap_peers: list[tuple[str, int]],
+    interval: float,
+) -> None:
+    """Ensure bootstrap peers without an ACTIVE registry record are probed."""
+    while True:
+        await asyncio.sleep(interval)
+        for host, port in bootstrap_peers:
+            existing = peer_registry.get_peer_by_address(host, port)
+            if existing is not None and existing.status == PeerStatus.ACTIVE:
+                continue
+            ping = Message(
+                type="PING",
+                sender_id=node.node_id,
+                payload={"target": f"{host}:{port}"},
+            )
+            transport.sendto(encode_message(ping), (host, port))
+            logging.debug("Bootstrap probe PING sent to %s:%s", host, port)
+
+
 async def monitor_peer_status(peer_registry: PeerRegistry) -> None:
     """Log peer status changes detected in the registry."""
     previous_statuses: dict[str, str] = {}
 
     while True:
         peers = peer_registry.get_all_peers()
+        active_ids = {peer.node_id for peer in peers}
+        for stale_id in list(previous_statuses):
+            if stale_id not in active_ids:
+                del previous_statuses[stale_id]
 
         for peer in peers:
             current_status = getattr(
@@ -418,6 +445,18 @@ async def run_node(
                 asyncio.create_task(dispatch_tasks_loop(task_executor)),
             ]
         )
+        if config.bootstrap_peers:
+            background_tasks.append(
+                asyncio.create_task(
+                    probe_bootstrap_peers_loop(
+                        node,
+                        transport,
+                        peer_registry,
+                        config.bootstrap_peers,
+                        config.heartbeat_interval_seconds,
+                    )
+                )
+            )
 
         logging.info("Peer status, CPU/RAM monitoring, and task dispatcher started.")
 

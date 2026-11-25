@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .peer_registry import PeerRecord, PeerRegistry
+from .peer_registry import PeerRecord, PeerRegistry, PeerStatus
 from .protocol import Message, validate_message
 
 
@@ -43,13 +43,12 @@ class PeerDiscovery:
         if not isinstance(message, Message):
             raise TypeError("message must be a protocol Message instance")
 
-        # Revalidate because Message objects can be modified after creation.
         validate_message(message)
-
         host, port = self._validate_address(address)
 
-        existing_peer = self.registry.get_peer(message.sender_id)
+        self.registry.evict_endpoint_duplicates(message.sender_id, host, port)
 
+        existing_peer = self.registry.get_peer(message.sender_id)
         if existing_peer is not None:
             return self.handle_duplicate_peer(message, (host, port))
 
@@ -57,6 +56,7 @@ class PeerDiscovery:
             node_id=message.sender_id,
             host=host,
             port=port,
+            status=PeerStatus.ACTIVE,
         )
 
     def handle_duplicate_peer(
@@ -71,19 +71,22 @@ class PeerDiscovery:
         validate_message(message)
         host, port = self._validate_address(address)
 
+        self.registry.evict_endpoint_duplicates(message.sender_id, host, port)
+
         updated_peer = self.registry.update_peer(
             node_id=message.sender_id,
             host=host,
             port=port,
+            status=PeerStatus.ACTIVE,
             refresh_last_seen=True,
         )
 
-        # Handle the case where the peer was removed between lookup and update.
         if updated_peer is None:
             return self.registry.register_peer(
                 node_id=message.sender_id,
                 host=host,
                 port=port,
+                status=PeerStatus.ACTIVE,
             )
 
         return updated_peer
