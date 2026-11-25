@@ -1,4 +1,4 @@
-﻿"""Async UDP transport for MeshWeaver."""
+"""Async UDP transport for MeshWeaver."""
 
 import asyncio
 import errno

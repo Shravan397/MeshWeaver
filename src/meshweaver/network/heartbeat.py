@@ -1,4 +1,4 @@
-﻿"""Heartbeat management for MeshWeaver P2P nodes."""
+"""Heartbeat management for MeshWeaver P2P nodes."""
 
 from __future__ import annotations
 
@@ -111,6 +111,8 @@ class HeartbeatManager:
         try:
             send(encoded, (peer.host, peer.port))
         except OSError as exc:
+            with self._lock:
+                self._pending.pop(message_id, None)
             logger.debug(
                 "Heartbeat PING send to %s (%s:%s) encountered socket error: %s",
                 peer_id,

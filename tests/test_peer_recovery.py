@@ -1,26 +1,32 @@
-﻿"""Tests for peer recovery, endpoint deduplication, heartbeat, and UDP errors."""
+"""Tests for peer recovery, endpoint deduplication, heartbeat, and UDP errors."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import Mock
 
 import pytest
 
+from meshweaver.__main__ import handle_message, probe_bootstrap_peers_loop
 from meshweaver.network.discovery import PeerDiscovery
 from meshweaver.network.heartbeat import HeartbeatManager
 from meshweaver.network.peer_registry import PeerRegistry, PeerStatus
 from meshweaver.network.protocol import Message, MessageType, decode_message
-from meshweaver.network.udp import MeshWeaverUDPProtocol
+from meshweaver.network.udp import MeshWeaverUDPProtocol, start_udp_listener
+from meshweaver.node import Node
 
 
 class FakeTransport:
     """In-memory UDP transport stand-in."""
 
-    def __init__(self) -> None:
+    def __init__(self, fail_with: OSError | None = None) -> None:
         self.sent_packets: list[tuple[bytes, tuple[str, int]]] = []
+        self.fail_with = fail_with
 
     def send(self, data: bytes, address: tuple[str, int]) -> int:
+        if self.fail_with is not None:
+            raise self.fail_with
         self.sent_packets.append((data, address))
         return len(data)
 
@@ -36,6 +42,27 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+def test_heartbeat_send_failure_cleans_up_pending_requests() -> None:
+    """Verify failed heartbeat sends do not leave dangling pending requests."""
+    win_err = OSError("An existing connection was forcibly closed by the remote host")
+    win_err.winerror = 10054  # type: ignore[attr-defined]
+    transport = FakeTransport(fail_with=win_err)
+    registry = PeerRegistry()
+    clock = FakeClock(1500.0)
+
+    registry.register_peer("node-worker", "127.0.0.1", 9000, last_seen=1500.0)
+    hb = HeartbeatManager(
+        node_id="node-submitter",
+        transport=transport,
+        peer_registry=registry,
+        clock=clock,
+    )
+
+    msg_id = hb.send_heartbeat("node-worker")
+    assert msg_id not in hb.pending_requests
+    assert len(hb.pending_requests) == 0
 
 
 def test_ping_pong_round_trip_communication() -> None:
@@ -84,14 +111,15 @@ def test_ping_pong_round_trip_communication() -> None:
     assert updated_b.cpu_percent == 12.5
 
 
-def test_peer_failure_detection_and_rediscovery_after_restart() -> None:
-    """Verify a timed-out peer is marked INACTIVE, probed again, and recovers."""
+def test_peer_recovery_with_same_and_different_node_id_after_restart() -> None:
+    """Verify recovery works when a restarted node keeps or changes its node_id."""
     transport = FakeTransport()
     registry = PeerRegistry()
     discovery = PeerDiscovery(registry)
     clock = FakeClock(3000.0)
 
-    registry.register_peer("node-worker", "127.0.0.1", 9000, last_seen=3000.0)
+    # Case A: Peer stops, times out, and restarts with the SAME node_id.
+    registry.register_peer("node-worker-1", "127.0.0.1", 9000, last_seen=3000.0)
     hb = HeartbeatManager(
         node_id="node-submitter",
         transport=transport,
@@ -102,80 +130,165 @@ def test_peer_failure_detection_and_rediscovery_after_restart() -> None:
     )
 
     hb.run_cycle()
-    assert len(transport.sent_packets) == 1
-
     clock.advance(6.0)
-    timed_out = hb.check_timeouts()
-    assert timed_out == ["node-worker"]
-
-    peer = registry.get_peer("node-worker")
-    assert peer is not None
-    assert peer.status == PeerStatus.INACTIVE
+    assert hb.check_timeouts() == ["node-worker-1"]
+    assert registry.get_peer("node-worker-1").status == PeerStatus.INACTIVE  # type: ignore[union-attr]
 
     hb.run_cycle()
-    assert len(transport.sent_packets) == 2
-    probe_ping = decode_message(transport.sent_packets[-1][0])
-
-    clock.advance(0.1)
-    pong = Message(
+    probe_same = decode_message(transport.sent_packets[-1][0])
+    clock.advance(0.05)
+    pong_same = Message(
         type=MessageType.PONG,
-        sender_id="node-worker",
-        message_id=probe_ping.message_id,
+        sender_id="node-worker-1",
+        message_id=probe_same.message_id,
         timestamp=clock(),
-        payload={"ref_id": probe_ping.message_id},
+        payload={"ref_id": probe_same.message_id},
     )
-    discovery.handle_discovery_message(pong, ("127.0.0.1", 9000))
-    rtt = hb.handle_message(pong)
+    discovery.handle_discovery_message(pong_same, ("127.0.0.1", 9000))
+    assert hb.handle_message(pong_same) == pytest.approx(0.05)
+    assert registry.get_peer("node-worker-1").status == PeerStatus.ACTIVE  # type: ignore[union-attr]
 
-    assert rtt == pytest.approx(0.1)
-    recovered = registry.get_peer("node-worker")
-    assert recovered is not None
-    assert recovered.status == PeerStatus.ACTIVE
+    # Case B: Peer stops again, times out, and restarts with a NEW node_id.
+    hb.run_cycle()
+    clock.advance(6.0)
+    assert hb.check_timeouts() == ["node-worker-1"]
+    assert registry.get_peer("node-worker-1").status == PeerStatus.INACTIVE  # type: ignore[union-attr]
 
-
-def test_new_node_id_at_existing_endpoint_replaces_stale_peer() -> None:
-    """Verify restarting with a new node_id on the same port deduplicates."""
-    transport = FakeTransport()
-    registry = PeerRegistry()
-    discovery = PeerDiscovery(registry)
-    clock = FakeClock(4000.0)
-
-    registry.register_peer(
-        "node-old",
-        "127.0.0.1",
-        9000,
-        status=PeerStatus.INACTIVE,
-        last_seen=3990.0,
-    )
-    hb = HeartbeatManager(
-        node_id="node-submitter",
-        transport=transport,
-        peer_registry=registry,
-        clock=clock,
-    )
-
-    ping_id = hb.send_heartbeat("node-old")
-    clock.advance(0.02)
-
-    pong = Message(
+    hb.run_cycle()
+    probe_diff = decode_message(transport.sent_packets[-1][0])
+    clock.advance(0.03)
+    pong_diff = Message(
         type=MessageType.PONG,
-        sender_id="node-new",
-        message_id=ping_id,
+        sender_id="node-worker-2",
+        message_id=probe_diff.message_id,
         timestamp=clock(),
-        payload={"ref_id": ping_id},
+        payload={"ref_id": probe_diff.message_id},
     )
-    discovery.handle_discovery_message(pong, ("127.0.0.1", 9000))
-    rtt = hb.handle_message(pong)
-
-    assert rtt == pytest.approx(0.02)
-    assert registry.get_peer("node-old") is None
+    discovery.handle_discovery_message(pong_diff, ("127.0.0.1", 9000))
+    assert hb.handle_message(pong_diff) == pytest.approx(0.03)
+    assert registry.get_peer("node-worker-1") is None
+    recovered_new = registry.get_peer("node-worker-2")
+    assert recovered_new is not None
+    assert recovered_new.status == PeerStatus.ACTIVE
     assert len(registry) == 1
 
-    new_peer = registry.get_peer("node-new")
-    assert new_peer is not None
-    assert new_peer.host == "127.0.0.1"
-    assert new_peer.port == 9000
-    assert new_peer.status == PeerStatus.ACTIVE
+
+def test_endpoint_deduplication_preserves_unrelated_peers() -> None:
+    """Verify deduplicating one endpoint does not remove peers at other endpoints."""
+    registry = PeerRegistry()
+    discovery = PeerDiscovery(registry)
+
+    registry.register_peer("peer-target-old", "127.0.0.1", 9000, status=PeerStatus.INACTIVE)
+    registry.register_peer("peer-other-port", "127.0.0.1", 9001, status=PeerStatus.ACTIVE)
+    registry.register_peer("peer-other-host", "10.0.0.5", 9000, status=PeerStatus.ACTIVE)
+
+    msg = Message(
+        type=MessageType.PONG,
+        sender_id="peer-target-new",
+        timestamp=4000.0,
+    )
+    discovery.handle_discovery_message(msg, ("127.0.0.1", 9000))
+
+    assert registry.get_peer("peer-target-old") is None
+    assert registry.get_peer("peer-target-new") is not None
+    assert registry.get_peer("peer-other-port") is not None
+    assert registry.get_peer("peer-other-host") is not None
+    assert len(registry) == 3
+
+
+def test_bootstrap_peer_recovery_when_unavailable_at_startup() -> None:
+    """Verify bootstrap probe discovers a peer that starts after the local node."""
+
+    async def run_test() -> None:
+        sub_node = Node(node_id="node-submitter")
+        sub_reg = PeerRegistry()
+        sub_disc = PeerDiscovery(sub_reg)
+        sub_hb: HeartbeatManager | None = None
+
+        worker_node = Node(node_id="node-worker-late")
+        worker_reg = PeerRegistry()
+        worker_disc = PeerDiscovery(worker_reg)
+        worker_hb: HeartbeatManager | None = None
+
+        sub_transport, _ = await start_udp_listener(
+            "127.0.0.1",
+            0,
+            decoder=decode_message,
+            message_handler=lambda msg, addr, tr: (
+                handle_message(msg, addr, tr, sub_node, sub_disc, sub_hb, sub_reg)
+                if sub_hb is not None
+                else None
+            ),
+        )
+        # Reserve an ephemeral port for the worker, then close it so worker is offline first.
+        temp_transport, _ = await start_udp_listener("127.0.0.1", 0)
+        worker_port = temp_transport.get_extra_info("sockname")[1]
+        temp_transport.close()
+        await asyncio.sleep(0)
+
+        worker_transport = None
+        probe_task = None
+        try:
+            sub_hb = HeartbeatManager(
+                node_id=sub_node.node_id,
+                transport=sub_transport,
+                peer_registry=sub_reg,
+            )
+            probe_task = asyncio.create_task(
+                probe_bootstrap_peers_loop(
+                    sub_node,
+                    sub_transport,
+                    sub_reg,
+                    [("127.0.0.1", worker_port)],
+                    interval=0.05,
+                )
+            )
+
+            # Let at least one bootstrap probe fire while worker is still offline.
+            await asyncio.sleep(0.12)
+            assert sub_reg.get_peer("node-worker-late") is None
+
+            # Now start the worker node on that bootstrap port.
+            worker_transport, _ = await start_udp_listener(
+                "127.0.0.1",
+                worker_port,
+                decoder=decode_message,
+                message_handler=lambda msg, addr, tr: (
+                    handle_message(msg, addr, tr, worker_node, worker_disc, worker_hb, worker_reg)
+                    if worker_hb is not None
+                    else None
+                ),
+            )
+            worker_hb = HeartbeatManager(
+                node_id=worker_node.node_id,
+                transport=worker_transport,
+                peer_registry=worker_reg,
+            )
+
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while asyncio.get_running_loop().time() < deadline:
+                discovered = sub_reg.get_peer("node-worker-late")
+                if discovered is not None and discovered.status == PeerStatus.ACTIVE:
+                    break
+                await asyncio.sleep(0.03)
+
+            recovered = sub_reg.get_peer("node-worker-late")
+            assert recovered is not None
+            assert recovered.status == PeerStatus.ACTIVE
+            assert recovered.port == worker_port
+        finally:
+            if probe_task is not None:
+                probe_task.cancel()
+                try:
+                    await probe_task
+                except asyncio.CancelledError:
+                    pass
+            if worker_transport is not None:
+                worker_transport.close()
+            sub_transport.close()
+            await asyncio.sleep(0)
+
+    asyncio.run(run_test())
 
 
 def test_heartbeat_matching_and_timeout_isolation() -> None:

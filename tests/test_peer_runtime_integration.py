@@ -131,8 +131,6 @@ def test_two_nodes_discover_exchange_heartbeats_and_detect_failure() -> None:
             )
 
             address_a = transport_a.get_extra_info("sockname")
-            address_b = transport_b.get_extra_info("sockname")
-
             # Register bootstrap peers so heartbeat managers know where
             # to send their first heartbeat.
 

@@ -1,4 +1,4 @@
-﻿"""Peer discovery using the existing protocol and peer registry."""
+"""Peer discovery using the existing protocol and peer registry."""
 
 from __future__ import annotations
 
