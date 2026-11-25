@@ -1,7 +1,9 @@
 ﻿"""Async UDP transport for MeshWeaver."""
 
 import asyncio
+import errno
 import logging
+import socket
 from collections.abc import Callable
 from typing import Any
 
@@ -12,6 +14,19 @@ MessageHandler = Callable[
     [Any, tuple[str, int], asyncio.DatagramTransport],
     None,
 ]
+
+WINERROR_CONNRESET = 10054
+
+
+def is_recoverable_udp_error(exc: BaseException) -> bool:
+    """Return True for transient UDP socket errors such as WinError 10054."""
+    if isinstance(exc, ConnectionResetError):
+        return True
+    if getattr(exc, "winerror", None) == WINERROR_CONNRESET:
+        return True
+    if getattr(exc, "errno", None) in (errno.ECONNRESET, WINERROR_CONNRESET):
+        return True
+    return False
 
 
 class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
@@ -25,6 +40,7 @@ class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
         self.transport: asyncio.DatagramTransport | None = None
         self.decoder = decoder
         self.message_handler = message_handler
+        self.recoverable_errors: int = 0
 
     def connection_made(
         self,
@@ -57,7 +73,15 @@ class MeshWeaverUDPProtocol(asyncio.DatagramProtocol):
             logger.exception("Could not process message received from %s", addr)
 
     def error_received(self, exc: Exception) -> None:
-        """Called when a UDP error occurs."""
+        """Called when a UDP error occurs; ignores transient ICMP resets."""
+        if is_recoverable_udp_error(exc):
+            self.recoverable_errors += 1
+            logger.debug(
+                "Ignored recoverable UDP socket error (peer unreachable/closed): %s",
+                exc,
+            )
+            return
+
         logger.error("UDP error: %s", exc)
 
     def connection_lost(self, exc: Exception | None) -> None:
@@ -86,5 +110,12 @@ async def start_udp_listener(
         ),
         local_addr=(host, port),
     )
+
+    sock = transport.get_extra_info("socket")
+    if sock is not None and hasattr(socket, "SIO_UDP_CONNRESET"):
+        try:
+            sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+        except OSError:
+            logger.debug("Could not disable SIO_UDP_CONNRESET on socket")
 
     return transport, protocol  # type: ignore[return-value]
