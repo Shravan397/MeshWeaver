@@ -11,6 +11,7 @@ Never deserialize cloudpickle payloads from untrusted peers.
 from __future__ import annotations
 
 import argparse
+import json
 import multiprocessing as mp
 import socket
 import socketserver
@@ -143,23 +144,25 @@ def _node_process(
         discovery.settimeout(0.15)
         event_queue.put(("ready", node_id, tcp_port))
         peers: dict[str, tuple[str, int]] = {}
+        connected_peers: set[str] = set()
+        last_probe: dict[str, float] = {}
         last_announce = 0.0
 
         while not stop_event.is_set():
             now = time.monotonic()
             if now - last_announce >= DISCOVERY_INTERVAL:
-                announcement = cloudpickle.dumps({
+                announcement = json.dumps({
                     "kind": "announce",
                     "node_id": node_id,
                     "host": "127.0.0.1",
                     "tcp_port": tcp_port,
-                })
+                }).encode("utf-8")
                 discovery.sendto(announcement, (MULTICAST_GROUP, DISCOVERY_PORT))
                 last_announce = now
 
             try:
                 data, _source = discovery.recvfrom(65535)
-                message = cloudpickle.loads(data)
+                message = json.loads(data.decode("utf-8"))
                 if message.get("kind") != "announce":
                     continue
                 peer_id = message.get("node_id")
@@ -175,11 +178,15 @@ def _node_process(
                 if peer_id not in peers:
                     peers[peer_id] = (host, peer_port)
                     event_queue.put(("discovered", node_id, peer_id, host, peer_port))
+                # Retry handshakes if a peer announced before its TCP server was ready.
+                if peer_id not in connected_peers and now - last_probe.get(peer_id, 0.0) >= 1.0:
+                    last_probe[peer_id] = now
                     try:
                         with socket.create_connection((host, peer_port), timeout=1.5) as peer:
                             _send_frame(peer, cloudpickle.dumps({"kind": "ping"}))
                             pong = cloudpickle.loads(_recv_frame(peer))
                             if pong.get("kind") == "pong":
+                                connected_peers.add(peer_id)
                                 event_queue.put(("connected", node_id, peer_id))
                     except OSError as exc:
                         event_queue.put(("connection_error", node_id, peer_id, str(exc)))
