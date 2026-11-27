@@ -175,22 +175,32 @@ def _node_process(
                     peers[peer_id] = (host, peer_port)
                     event_queue.put(("discovered", node_id, peer_id, host, peer_port))
                 # Retry handshakes if a peer announced before its TCP server was ready.
-                if peer_id not in connected_peers and now - last_probe.get(peer_id, 0.0) >= 1.0:
+                should_probe = (
+                    peer_id not in connected_peers
+                    and now - last_probe.get(peer_id, 0.0) >= 1.0
+                )
+                if should_probe:
                     last_probe[peer_id] = now
                     try:
-                        with socket.create_connection((host, peer_port), timeout=1.5) as peer:
+                        with socket.create_connection(
+                            (host, peer_port), timeout=1.5
+                        ) as peer:
                             _send_frame(peer, cloudpickle.dumps({"kind": "ping"}))
                             pong = cloudpickle.loads(_recv_frame(peer))
                             if pong.get("kind") == "pong":
                                 connected_peers.add(peer_id)
                                 event_queue.put(("connected", node_id, peer_id))
                     except OSError as exc:
-                        event_queue.put(("connection_error", node_id, peer_id, str(exc)))
+                        event_queue.put(
+                            ("connection_error", node_id, peer_id, str(exc))
+                        )
             except socket.timeout:
                 continue
             except (OSError, ValueError, TypeError):
                 if not stop_event.is_set():
-                    event_queue.put(("discovery_error", node_id, "invalid announcement"))
+                    event_queue.put(
+                        ("discovery_error", node_id, "invalid announcement")
+                    )
     except OSError as exc:
         event_queue.put(("startup_error", node_id, str(exc)))
     finally:
@@ -220,7 +230,9 @@ def _remote_execute(
 
 def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
     if cloudpickle is None:
-        raise RuntimeError('Install the demo extra with: pip install -e ".[mid-review]"')
+        raise RuntimeError(
+            'Install the demo extra with: pip install -e ".[mid-review]"'
+        )
     if node_count < 2 or node_count > 32:
         raise ValueError("node_count must be between 2 and 32")
     context = mp.get_context("spawn")
@@ -266,11 +278,14 @@ def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
                 print(f"[{kind}] {event[1:]}")
 
             pair_count = sum(len(peers) for peers in discovered.values())
-            if len(ready) == node_count and pair_count >= expected_pairs and len(connected) >= expected_pairs:
+            all_peers_discovered = pair_count >= expected_pairs
+            all_peers_connected = len(connected) >= expected_pairs
+            if len(ready) == node_count and all_peers_discovered and all_peers_connected:
                 break
 
         print("\n=== MESHWEAVER NETWORK AUDIT ===")
-        print(f"Independent processes started: {sum(p.is_alive() for p in processes)}/{node_count}")
+        running_count = sum(process.is_alive() for process in processes)
+        print(f"Independent processes still running: {running_count}/{node_count}")
         print(f"Nodes ready: {len(ready)}/{node_count}")
         pair_count = sum(len(peers) for peers in discovered.values())
         print(f"Directed peer discoveries: {pair_count}/{expected_pairs}")
@@ -278,8 +293,14 @@ def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
         for node_id in sorted(discovered):
             print(f"{node_id}: {len(discovered[node_id])} peers discovered")
 
-        if len(ready) != node_count or pair_count < expected_pairs or len(connected) < expected_pairs:
-            print("NETWORK AUDIT: FAIL (not all nodes discovered and contacted every peer)")
+        if (
+            len(ready) != node_count
+            or pair_count < expected_pairs
+            or len(connected) < expected_pairs
+        ):
+            print(
+                "NETWORK AUDIT: FAIL (not all nodes discovered and contacted every peer)"
+            )
             return 1
 
         target_id = "node-02"
@@ -289,12 +310,17 @@ def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
             return 1
 
         args = ([1.0, 2.0, 3.0, 4.0], [3.0, 5.0, 7.0, 9.0], 0.5, 0.0, 0.01)
-        remote = _remote_execute(target[0], target[1], linear_regression_step, list(args))
+        remote = _remote_execute(
+            target[0], target[1], linear_regression_step, list(args)
+        )
         expected = linear_regression_step(*args)
         result_ok = (
             remote.get("kind") == "result"
             and remote.get("node_id") == target_id
-            and all(abs(remote["result"][key] - value) < 1e-12 for key, value in expected.items())
+            and all(
+                abs(remote["result"][key] - value) < 1e-12
+                for key, value in expected.items()
+            )
         )
         print("\n=== SERIALIZATION CHECK ===")
         print(f"Sender: node-01 | Receiver: {target_id}")
@@ -316,8 +342,14 @@ def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MeshWeaver mid-review demo")
-    parser.add_argument("--nodes", type=int, default=10, help="number of local node processes (default: 10)")
-    parser.add_argument("--timeout", type=float, default=20.0, help="discovery timeout in seconds")
+    parser.add_argument(
+        "--nodes", type=int, default=10,
+        help="number of local node processes (default: 10)",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=20.0,
+        help="discovery timeout in seconds",
+    )
     args = parser.parse_args()
     raise SystemExit(run_audit(args.nodes, args.timeout))
 
