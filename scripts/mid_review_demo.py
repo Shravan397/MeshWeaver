@@ -16,18 +16,14 @@ import multiprocessing as mp
 import socket
 import socketserver
 import struct
-import sys
 import threading
 import time
 from typing import Any
 
 try:
     import cloudpickle
-except ImportError as exc:  # pragma: no cover - exercised by CLI setup
-    raise SystemExit(
-        "Missing optional dependency. Install with: "
-        'python -m pip install -e ".[dev,mid-review]"'
-    ) from exc
+except ImportError:  # pragma: no cover - exercised by CLI setup
+    cloudpickle = None
 
 MULTICAST_GROUP = "239.255.42.99"
 DISCOVERY_PORT = 37020
@@ -223,6 +219,8 @@ def _remote_execute(
 
 
 def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
+    if cloudpickle is None:
+        raise RuntimeError('Install the demo extra with: pip install -e ".[mid-review]"')
     if node_count < 2 or node_count > 32:
         raise ValueError("node_count must be between 2 and 32")
     context = mp.get_context("spawn")
