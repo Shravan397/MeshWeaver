@@ -280,7 +280,11 @@ def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
             pair_count = sum(len(peers) for peers in discovered.values())
             all_peers_discovered = pair_count >= expected_pairs
             all_peers_connected = len(connected) >= expected_pairs
-            if len(ready) == node_count and all_peers_discovered and all_peers_connected:
+            if (
+                len(ready) == node_count
+                and all_peers_discovered
+                and all_peers_connected
+            ):
                 break
 
         print("\n=== MESHWEAVER NETWORK AUDIT ===")
@@ -299,7 +303,8 @@ def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
             or len(connected) < expected_pairs
         ):
             print(
-                "NETWORK AUDIT: FAIL (not all nodes discovered and contacted every peer)"
+                "NETWORK AUDIT: FAIL "
+                "(not all nodes discovered and contacted every peer)"
             )
             return 1
 
