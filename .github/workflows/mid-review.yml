@@ -1,0 +1,26 @@
+name: Mid-review checks
+
+on:
+  push:
+    branches:
+      - mid-review-demo
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project and review dependencies
+        run: python -m pip install -e ".[dev,mid-review]"
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Run Ruff
+        run: python -m ruff check .
