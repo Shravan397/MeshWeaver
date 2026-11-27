@@ -194,7 +194,7 @@ def _node_process(
                         event_queue.put(
                             ("connection_error", node_id, peer_id, str(exc))
                         )
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except (OSError, ValueError, TypeError):
                 if not stop_event.is_set():
@@ -333,7 +333,7 @@ def run_audit(node_count: int = 10, timeout_seconds: float = 20.0) -> int:
         print(f"Remote result: {remote.get('result')}")
         print(f"Result matches local calculation: {'YES' if result_ok else 'NO'}")
         print(f"SERIALIZATION CHECK: {'PASS' if result_ok else 'FAIL'}")
-        print(f"NETWORK AUDIT: PASS")
+        print("NETWORK AUDIT: PASS")
         return 0 if result_ok else 1
     finally:
         stop_event.set()
