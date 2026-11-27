@@ -97,6 +97,37 @@ MeshWeaver/
 4. Commit with a descriptive message.
 5. Open a pull request into `main`; merge only after review.
 
+
+## Mid-project review demonstrations
+
+The repository includes a controlled local demonstration for the two review
+requirements: ten independently running node processes with runtime peer
+discovery, and remote execution of a serialized linear-regression function.
+
+Install the optional demo dependency:
+
+```powershell
+python -m pip install -e ".[dev,mid-review]"
+```
+
+Run both demonstrations:
+
+```powershell
+python -m scripts.mid_review_demo --nodes 10 --timeout 25
+```
+
+Run the test suite:
+
+```powershell
+python -m pytest -q
+python -m ruff check .
+```
+
+See [docs/MID_REVIEW.md](docs/MID_REVIEW.md) for setup, expected acceptance
+criteria, evidence collection, and the security limitations of Cloudpickle.
+The review targets are not claimed as passed until the commands are run and
+their actual output is saved.
+
 ## Documentation
 
 See [docs/architecture.md](docs/architecture.md) for the current module responsibilities and known limitations.
