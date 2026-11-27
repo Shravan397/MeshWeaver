@@ -178,9 +178,15 @@ def test_endpoint_deduplication_preserves_unrelated_peers() -> None:
     registry = PeerRegistry()
     discovery = PeerDiscovery(registry)
 
-    registry.register_peer("peer-target-old", "127.0.0.1", 9000, status=PeerStatus.INACTIVE)
-    registry.register_peer("peer-other-port", "127.0.0.1", 9001, status=PeerStatus.ACTIVE)
-    registry.register_peer("peer-other-host", "10.0.0.5", 9000, status=PeerStatus.ACTIVE)
+    registry.register_peer(
+        "peer-target-old", "127.0.0.1", 9000, status=PeerStatus.INACTIVE
+    )
+    registry.register_peer(
+        "peer-other-port", "127.0.0.1", 9001, status=PeerStatus.ACTIVE
+    )
+    registry.register_peer(
+        "peer-other-host", "10.0.0.5", 9000, status=PeerStatus.ACTIVE
+    )
 
     msg = Message(
         type=MessageType.PONG,
@@ -220,7 +226,7 @@ def test_bootstrap_peer_recovery_when_unavailable_at_startup() -> None:
                 else None
             ),
         )
-        # Reserve an ephemeral port for the worker, then close it so worker is offline first.
+        # Reserve an ephemeral port, then close it before the worker starts.
         temp_transport, _ = await start_udp_listener("127.0.0.1", 0)
         worker_port = temp_transport.get_extra_info("sockname")[1]
         temp_transport.close()
@@ -254,7 +260,9 @@ def test_bootstrap_peer_recovery_when_unavailable_at_startup() -> None:
                 worker_port,
                 decoder=decode_message,
                 message_handler=lambda msg, addr, tr: (
-                    handle_message(msg, addr, tr, worker_node, worker_disc, worker_hb, worker_reg)
+                    handle_message(
+                        msg, addr, tr, worker_node, worker_disc, worker_hb, worker_reg
+                    )
                     if worker_hb is not None
                     else None
                 ),
