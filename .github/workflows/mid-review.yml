@@ -22,5 +22,7 @@ jobs:
         run: python -m pip install -e ".[dev,mid-review]"
       - name: Run tests
         run: python -m pytest -q
+      - name: Run ten-node network and serialization audit
+        run: python -m scripts.mid_review_demo --nodes 10 --timeout 25
       - name: Run Ruff
         run: python -m ruff check .
